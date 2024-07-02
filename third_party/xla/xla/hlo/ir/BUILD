@@ -2,6 +2,7 @@
 #   XLA’s HLO Intermediate Representation implementation.
 
 load("@local_tsl//tsl/platform:rules_cc.bzl", "cc_library")
+load("//xla:xla.bzl", "xla_cc_test")
 load("//xla/tsl:tsl.bzl", "internal_visibility")
 
 package(
@@ -27,6 +28,7 @@ cc_library(
         "hlo_frontend_attributes.cc",
         "hlo_input_output_alias_config.cc",
         "hlo_instruction.cc",
+        "hlo_instruction_utils.cc",
         "hlo_instructions.cc",
         "hlo_module.cc",
         "hlo_module_metadata.cc",
@@ -48,6 +50,7 @@ cc_library(
         "hlo_frontend_attributes.h",
         "hlo_input_output_alias_config.h",
         "hlo_instruction.h",
+        "hlo_instruction_utils.h",
         "hlo_instructions.h",
         "hlo_module.h",
         "hlo_module_metadata.h",
@@ -58,6 +61,7 @@ cc_library(
         "hlo_sharding_metadata.h",
     ],
     deps = [
+        ":backend_config",
         ":ptrvec",
         ":tile_assignment",
         "//xla:array",
@@ -68,9 +72,7 @@ cc_library(
         "//xla:protobuf_util",
         "//xla:shape_tree",
         "//xla:shape_util",
-        "//xla:status",
         "//xla:status_macros",
-        "//xla:statusor",
         "//xla:types",
         "//xla:util",
         "//xla:window_util",
@@ -98,7 +100,6 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:cord",
         "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
         "@local_tsl//tsl/lib/gtl:iterator_range",
         "@local_tsl//tsl/lib/gtl:map_util",
@@ -110,6 +111,36 @@ cc_library(
         "@local_tsl//tsl/platform:protobuf",
         "@local_tsl//tsl/platform:status",
         "@local_tsl//tsl/platform:statusor",
+    ],
+)
+
+cc_library(
+    name = "backend_config",
+    srcs = ["backend_config.cc"],
+    hdrs = ["backend_config.h"],
+    deps = [
+        "//xla:util",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/synchronization",
+        "@local_tsl//tsl/platform:errors",
+        "@local_tsl//tsl/platform:human_readable_json",
+        "@local_tsl//tsl/platform:protobuf",
+    ],
+)
+
+xla_cc_test(
+    name = "backend_config_test",
+    srcs = ["backend_config_test.cc"],
+    deps = [
+        ":backend_config",
+        "//xla/service/gpu:backend_configs_cc",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+        "@local_tsl//tsl/lib/core:status_test_util",
+        "@local_tsl//tsl/platform:test",
+        "@local_tsl//tsl/platform:test_main",
     ],
 )
 
@@ -181,6 +212,8 @@ cc_library(
         "//xla:printer",
         "//xla:util",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/types:span",
     ],
 )

@@ -32,7 +32,6 @@ cc_library(
     hdrs = ["opt_lib.h"],
     deps = [
         "//xla:debug_options_flags",
-        "//xla:statusor",
         "//xla:types",
         "//xla:xla_proto_cc",
         "//xla/hlo/ir:hlo",
@@ -57,10 +56,10 @@ cc_library(
     name = "gpu_opt",
     testonly = True,
     srcs = if_gpu_is_configured(["gpu_opt.cc"]),
+    tags = ["gpu"],
     deps = [
         ":opt_lib",
         "//xla:debug_options_flags",
-        "//xla:statusor",
         "//xla:types",
         "//xla/hlo/ir:hlo",
         "//xla/service:buffer_value",
@@ -100,10 +99,16 @@ cc_library(
     srcs = ["cpu_opt.cc"],
     deps = [
         ":opt_lib",
+        "//xla/hlo/ir:hlo",
         "//xla/service:cpu_plugin",
+        "//xla/service:executable",
         "//xla/service:hlo_graph_dumper",
+        "//xla/service/cpu:cpu_executable",
         "//xla/stream_executor/host:host_platform",
         "//xla/stream_executor/platform",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@local_tsl//tsl/platform:statusor",
     ],
     alwayslink = True,  # Initializer needs to run.
 )
@@ -116,8 +121,6 @@ cc_library(
         "cpu_opt",
         ":opt_lib",
         "//xla:debug_options_flags",
-        "//xla:status",
-        "//xla:statusor",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_runner",
         "//xla/service:platform_util",
@@ -126,6 +129,7 @@ cc_library(
         "//xla/tsl/util:command_line_flags",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@local_tsl//tsl/platform:env",
         "@local_tsl//tsl/platform:errors",
@@ -149,6 +153,7 @@ lit_test_suite(
     srcs = enforce_glob(
         [
             "cpu_hlo.hlo",
+            "cpu_llvm.hlo",
             "gpu_hlo.hlo",
             "gpu_hlo_backend.hlo",
             "gpu_hlo_buffers.hlo",

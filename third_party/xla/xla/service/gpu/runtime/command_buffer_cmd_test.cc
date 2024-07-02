@@ -28,13 +28,13 @@ limitations under the License.
 #include "xla/service/gpu/runtime/thunk.h"
 #include "xla/service/platform_util.h"
 #include "xla/service/service_executable_run_options.h"
-#include "xla/status.h"
 #include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/gpu/gpu_test_kernels.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream_executor.h"
+#include "xla/stream_executor/stream_executor_memory_allocator.h"
 #include "xla/types.h"  // IWYU pragma: keep
 #include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/status.h"
@@ -65,7 +65,9 @@ static constexpr auto s1 = ExecutionStreamId(1);
 struct TestOnlyCommandBufferCmd : public CommandBufferCmd {
   TestOnlyCommandBufferCmd(ExecutionStreamId execution_stream_id,
                            BufferUsageVector buffer_usage)
-      : CommandBufferCmd(execution_stream_id), buffer_usage(buffer_usage) {}
+      : CommandBufferCmd(CommandBufferCmdType::kUnknownCmd,
+                         execution_stream_id),
+        buffer_usage(buffer_usage) {}
 
   absl::Status Record(const Thunk::ExecuteParams&, const RecordParams&,
                       se::CommandBuffer*) override {
@@ -214,7 +216,8 @@ TEST(CommandBufferCmdTest, MemcpyCmd) {
 
   CommandBufferCmd::RecordParams record_params = {state};
 
-  auto command_buffer = se::CommandBuffer::Create(executor).value();
+  auto command_buffer =
+      executor->CreateCommandBuffer(se::CommandBuffer::Mode::kPrimary).value();
   TF_ASSERT_OK(commands.Record(params, record_params, command_buffer.get()));
 
   // Execute command buffer and verify that it copied the memory.
@@ -282,17 +285,28 @@ TEST(CommandBufferCmdTest, BarrierCmd) {
 
   CommandBufferCmd::RecordParams record_params = {state};
 
-  auto command_buffer = se::CommandBuffer::Create(executor).value();
+  auto command_buffer =
+      executor->CreateCommandBuffer(se::CommandBuffer::Mode::kPrimary).value();
   TF_ASSERT_OK(commands.Record(params, record_params, command_buffer.get()));
 
   // Execute command buffer and verify that it copied the memory.
   TF_ASSERT_OK(executor->Submit(stream.get(), *command_buffer));
 
-  // Copy `b` data back to host.
-  std::vector<int32_t> dst(4, 0);
-  TF_ASSERT_OK(stream->Memcpy(dst.data(), e, byte_length));
+  // Copy data back to host, correct executor order should populate all buffers
+  // with expected value.
+  std::vector<int32_t> dst_b(4, 0);
+  std::vector<int32_t> dst_c(4, 0);
+  std::vector<int32_t> dst_d(4, 0);
+  std::vector<int32_t> dst_e(4, 0);
+  TF_ASSERT_OK(stream->Memcpy(dst_b.data(), b, byte_length));
+  TF_ASSERT_OK(stream->Memcpy(dst_c.data(), c, byte_length));
+  TF_ASSERT_OK(stream->Memcpy(dst_d.data(), d, byte_length));
+  TF_ASSERT_OK(stream->Memcpy(dst_e.data(), e, byte_length));
 
-  ASSERT_EQ(dst, std::vector<int32_t>(4, 42));
+  ASSERT_EQ(dst_b, std::vector<int32_t>(4, 42));
+  ASSERT_EQ(dst_c, std::vector<int32_t>(4, 42));
+  ASSERT_EQ(dst_d, std::vector<int32_t>(4, 42));
+  ASSERT_EQ(dst_e, std::vector<int32_t>(4, 42));
 }
 
 TEST(CommandBufferCmdTest, LaunchCmd) {
@@ -349,7 +363,8 @@ TEST(CommandBufferCmdTest, LaunchCmd) {
 
   CommandBufferCmd::RecordParams record_params = {state};
 
-  auto command_buffer = se::CommandBuffer::Create(executor).value();
+  auto command_buffer =
+      executor->CreateCommandBuffer(se::CommandBuffer::Mode::kPrimary).value();
   TF_ASSERT_OK(commands.Record(params, record_params, command_buffer.get()));
 
   // Execute command buffer and verify that it copied the memory.
@@ -385,81 +400,89 @@ TEST(CommandBufferCmdStateManageTest, GetOrCreateState) {
 }
 
 TEST(TracedCommandBuffer, GetOrUpdateCommandBuffer) {
-  se::StreamExecutor* executor = GpuExecutor();
+  auto run_traced_test = [](int trace_cache_size) {
+    se::StreamExecutor* executor = GpuExecutor();
 
-  auto stream = executor->CreateStream().value();
-  BufferAllocation alloc0(/*index=*/0, /*size=*/1024, /*color=*/0);
-  BufferAllocation alloc1(/*index=*/1, /*size=*/1024, /*color=*/0);
+    auto stream = executor->CreateStream().value();
+    BufferAllocation alloc0(/*index=*/0, /*size=*/1024, /*color=*/0);
+    BufferAllocation alloc1(/*index=*/1, /*size=*/1024, /*color=*/0);
 
-  CommandBufferCmd::BufferUsageVector buffers = {
-      {BufferAllocation::Slice(&alloc0, 0, 1024), MemoryAccess::kRead},
-      {BufferAllocation::Slice(&alloc1, 0, 1024), MemoryAccess::kWrite}};
+    CommandBufferCmd::BufferUsageVector buffers = {
+        {BufferAllocation::Slice(&alloc0, 0, 1024), MemoryAccess::kRead},
+        {BufferAllocation::Slice(&alloc1, 0, 1024), MemoryAccess::kWrite}};
 
-  TracedCommandBuffer traced_cmd_buffer(buffers, /*capacity=*/2);
+    TracedCommandBuffer traced_cmd_buffer(buffers,
+                                          /*capacity=*/trace_cache_size);
 
-  se::DeviceMemoryBase mem0(reinterpret_cast<void*>(0x01234567));
-  se::DeviceMemoryBase mem1(reinterpret_cast<void*>(0x12345670));
+    se::DeviceMemoryBase mem0(reinterpret_cast<void*>(0x01234567));
+    se::DeviceMemoryBase mem1(reinterpret_cast<void*>(0x12345670));
 
-  se::StreamExecutorMemoryAllocator allocator(executor);
-  BufferAllocations allocations({mem0, mem1}, 0, &allocator);
+    se::StreamExecutorMemoryAllocator allocator(executor);
+    BufferAllocations allocations({mem0, mem1}, 0, &allocator);
 
-  // No-op trace callback to count how many times it was called.
-  int64_t num_calls = 0;
-  auto trace = [&](se::Stream*) {
-    num_calls++;
-    return absl::OkStatus();
+    // No-op trace callback to count how many times it was called.
+    int64_t num_calls = 0;
+    auto trace = [&](se::Stream*) {
+      num_calls++;
+      return absl::OkStatus();
+    };
+
+    TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer0,
+                            traced_cmd_buffer.GetOrTraceCommandBuffer(
+                                &allocations, executor, stream.get(), trace));
+
+    TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer1,
+                            traced_cmd_buffer.GetOrTraceCommandBuffer(
+                                &allocations, executor, stream.get(), trace));
+
+    // Check that command buffer was reused as buffer allocations didn't
+    // change.
+    ASSERT_EQ(command_buffer0, command_buffer1);
+    EXPECT_EQ(num_calls, 1);
+
+    // Check that when memory address changes we re-trace the command
+    // buffer.
+    se::DeviceMemoryBase mem2(reinterpret_cast<void*>(0x23456701));
+    allocations = BufferAllocations({mem0, mem2}, 0, &allocator);
+
+    TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer2,
+                            traced_cmd_buffer.GetOrTraceCommandBuffer(
+                                &allocations, executor, stream.get(), trace));
+
+    ASSERT_NE(command_buffer0, command_buffer2);
+    EXPECT_EQ(num_calls, 2);
+
+    // Check that we keep first command buffer in cache.
+    allocations = BufferAllocations({mem0, mem1}, 0, &allocator);
+
+    TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer3,
+                            traced_cmd_buffer.GetOrTraceCommandBuffer(
+                                &allocations, executor, stream.get(), trace));
+    ASSERT_EQ(command_buffer0, command_buffer3);
+    EXPECT_EQ(num_calls, 2);
+
+    // Check that we trace a new graph when buffer allocation pattern is
+    // new.
+    allocations = BufferAllocations({mem0, mem0}, 0, &allocator);
+
+    TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer4,
+                            traced_cmd_buffer.GetOrTraceCommandBuffer(
+                                &allocations, executor, stream.get(), trace));
+    ASSERT_NE(command_buffer4, command_buffer3);
+    ASSERT_NE(command_buffer4, command_buffer2);
+    EXPECT_EQ(num_calls, 3);
+
+    // Check that we still keep the previous graph in cache.
+    allocations = BufferAllocations({mem0, mem1}, 0, &allocator);
+
+    TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer5,
+                            traced_cmd_buffer.GetOrTraceCommandBuffer(
+                                &allocations, executor, stream.get(), trace));
+    ASSERT_EQ(command_buffer0, command_buffer5);
+    EXPECT_EQ(num_calls, 3);
   };
-
-  TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer0,
-                          traced_cmd_buffer.GetOrTraceCommandBuffer(
-                              &allocations, executor, stream.get(), trace));
-
-  TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer1,
-                          traced_cmd_buffer.GetOrTraceCommandBuffer(
-                              &allocations, executor, stream.get(), trace));
-
-  // Check that command buffer was reused as buffer allocations didn't change.
-  ASSERT_EQ(command_buffer0, command_buffer1);
-  EXPECT_EQ(num_calls, 1);
-
-  // Check that when memory address changes we re-trace the command buffer.
-  se::DeviceMemoryBase mem2(reinterpret_cast<void*>(0x23456701));
-  allocations = BufferAllocations({mem0, mem2}, 0, &allocator);
-
-  TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer2,
-                          traced_cmd_buffer.GetOrTraceCommandBuffer(
-                              &allocations, executor, stream.get(), trace));
-
-  ASSERT_NE(command_buffer0, command_buffer2);
-  EXPECT_EQ(num_calls, 2);
-
-  // Check that we keep first command buffer in cache.
-  allocations = BufferAllocations({mem0, mem1}, 0, &allocator);
-
-  TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer3,
-                          traced_cmd_buffer.GetOrTraceCommandBuffer(
-                              &allocations, executor, stream.get(), trace));
-  ASSERT_EQ(command_buffer0, command_buffer3);
-  EXPECT_EQ(num_calls, 2);
-
-  // Check that we trace a new graph when buffer allocation pattern is new.
-  allocations = BufferAllocations({mem0, mem0}, 0, &allocator);
-
-  TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer4,
-                          traced_cmd_buffer.GetOrTraceCommandBuffer(
-                              &allocations, executor, stream.get(), trace));
-  ASSERT_NE(command_buffer4, command_buffer3);
-  ASSERT_NE(command_buffer4, command_buffer2);
-  EXPECT_EQ(num_calls, 3);
-
-  // Check that we still keep the previous graph in cache.
-  allocations = BufferAllocations({mem0, mem1}, 0, &allocator);
-
-  TF_ASSERT_OK_AND_ASSIGN(auto* command_buffer5,
-                          traced_cmd_buffer.GetOrTraceCommandBuffer(
-                              &allocations, executor, stream.get(), trace));
-  ASSERT_EQ(command_buffer0, command_buffer5);
-  EXPECT_EQ(num_calls, 3);
+  run_traced_test(2);
+  run_traced_test(3);
 }
 
 //===----------------------------------------------------------------------===//

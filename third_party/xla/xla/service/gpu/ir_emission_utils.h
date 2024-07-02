@@ -29,8 +29,6 @@ limitations under the License.
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"
-#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
-#include "mlir/IR/Value.h"  // from @llvm-project
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/literal.h"
@@ -63,13 +61,13 @@ inline constexpr int64_t WarpSize() { return 32; }
 // FusionBackendConfig.kind requel to this string.
 inline constexpr absl::string_view kCustomFusionKind = "__custom_fusion";
 
+// Generic fusions that use Triton have FusionBackendConfig.kind equal to this
+// string. This fusion kind will eventually subsume all usages of
+// kTritonGemmFusionKind and kTritonSoftmaxFusionKind.
+inline constexpr absl::string_view kTritonFusionKind = "__triton";
+
 // Fusions that use Triton have FusionBackendConfig.kind equal to this string.
 inline constexpr absl::string_view kTritonGemmFusionKind = "__triton_gemm";
-
-// SoftmaxRewriterTriton sets backend_config of Triton Softmax custom fusions to
-// this string.
-inline constexpr absl::string_view kTritonSoftmaxFusionKind =
-    "__triton_softmax";
 
 inline constexpr absl::string_view kCuDnnFusionKind = "__cudnn$fusion";
 
@@ -114,30 +112,26 @@ bool IsContiguousSlice(const Shape& orig, const Shape& sliced);
 // can't correctly do so on both Volta and earlier GPUs.
 //
 // https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-shfl-sync
-llvm::Value* EmitFullWarpShuffleDown(llvm::Value* value, llvm::Value* offset,
-                                     llvm::IRBuilder<>* builder);
+llvm::Value* EmitFullWarpShuffleDown(
+    llvm::Value* value, llvm::Value* offset, llvm::IRBuilder<>* builder,
+    const se::DeviceDescription& gpu_device_info);
 
 // Emits code that determines whether the current thread is thread 0 within
 // block 0 of the kernel.
 llvm::Value* IsBlock0Thread0(llvm::IRBuilder<>* b);
 
-llvm::SmallVector<mlir::Value> GetHloOperands(mlir::Operation* op);
-llvm::SmallVector<mlir::Value> GetHloOutputs(mlir::Operation* op);
-
-bool WritesMlirBuffer(mlir::Operation* op, mlir::Value operand);
-
-absl::StatusOr<BufferAllocation::Slice> GetAllocationSlice(
-    mlir::Value v, absl::Span<const BufferAllocation* const> allocations,
-    std::string* constant_name = nullptr);
-
 absl::StatusOr<BufferAllocation::Slice> GetAllocationSlice(
     const BufferAssignment& buffer_assignment, const HloInstruction* instr,
     const ShapeIndex& index);
 
+// Returns whether 'fusion' can be emitted with the dynamic update slice
+// in-place emitter.
 absl::StatusOr<bool> CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
     const HloFusionInstruction* fusion,
-    const BufferAssignment* buffer_assignment,
-    const std::vector<const HloInstruction*>& roots);
+    std::function<absl::StatusOr<BufferAllocation::Slice>(
+        const HloInstruction* instr, const ShapeIndex& index)>
+        get_allocation_slice,
+    absl::Span<HloInstructionAdaptor const> roots);
 
 // Returns the dynamic-update-slice instructions defining the results of a
 // fusion node. A dynamic slice update is said to be "defining" of a result if
@@ -145,9 +139,7 @@ absl::StatusOr<bool> CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
 // output of a bitcast of a dynamic slice update---since such bitcast may be
 // handled as a no-op.
 std::vector<const HloInstruction*> GetOutputDefiningDynamicUpdateSlices(
-    const std::vector<const HloInstruction*>& roots);
-
-Shape GetShape(mlir::Value value);
+    absl::Span<HloInstructionAdaptor const> roots);
 
 // Returns the first hero instruction reachable from `instr` as root. Hero
 // instruction can be in a different computation if the parent HloFusionAdaptor
@@ -188,13 +180,8 @@ struct TransposeDescription {
 std::optional<TransposeDescription> GetDescriptionForTiledTransposeEmitter(
     const HloInstruction& root, const HloInstruction& hero);
 
-// Checks if the instruction is elementwise and only has a single user. If
-// a fusion adaptor is provided, only checks for users within the fusion. If
-// `add_single_user_check` is true, then it is also checked whether `instr` has
-// at most 1 user.
-bool IsIntermediate(const HloInstruction* instr, int allowed_operand_count = 1,
-                    const HloFusionAdaptor* fusion = nullptr,
-                    bool add_single_user_check = false);
+// Checks if the instruction is elementwise.
+bool IsIntermediate(const HloInstruction* instr, int allowed_operand_count = 1);
 
 // Log the given module if the VLOG level is >= level.
 void VLogModule(int level, const llvm::Module& module);
@@ -212,13 +199,6 @@ void VerifyModule(const llvm::Module& module);
 // Otherwise, the return type is i64.
 llvm::Type* GetIndexTypeForKernel(const HloInstruction* hlo,
                                   int64_t launch_size, llvm::IRBuilder<>* b);
-
-// The same as GetIndexTypeForKernel, but works with MLIR ops.
-llvm::Type* GetIndexTypeForKernel(mlir::Operation* op, int64_t launch_size,
-                                  llvm::IRBuilder<>* b);
-
-// Returns a sanitized (doesn't need quoting) identifier name from a location.
-std::string GetIrNameFromLoc(mlir::Location loc);
 
 // Whether the module's target is an AMD GPU.
 bool IsAMDGPU(const llvm::Module* module);

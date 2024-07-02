@@ -37,38 +37,58 @@ cc_library(
         "//xla/tests:client_library_test_base",
         "//xla/tests:literal_test_util",
         "//xla/tests:test_macros_header",
-        "//xla/tests:xla_internal_test_main",
         "@com_google_absl//absl/strings",
     ],
 )
 
-xla_test(
-    name = "exhaustive_unary_test_f32_or_smaller",
-    srcs = ["exhaustive_unary_test_f32_or_smaller.cc"],
-    real_hardware_only = True,  # Very slow on the interpreter.
-    shard_count = 48,
-    tags = [
-        "optonly",
-        # This is a big test that we skip for capacity reasons in OSS testing.
-        "no_oss",
-    ],
-    deps = [
-        ":exhaustive_op_test_utils",
-        "//xla:util",
-        "//xla/tests:client_library_test_base",
-    ],
+filegroup(
+    name = "exhaustive_unary_f32_or_smaller_test_lib_srcs",
+    testonly = True,
+    srcs = ["exhaustive_unary_f32_or_smaller_test.cc"],
 )
 
 xla_test(
-    name = "exhaustive_unary_test_f64",
-    srcs = ["exhaustive_unary_test_f64.cc"],
+    name = "exhaustive_unary_f32_or_smaller_test",
+    srcs = [
+        "exhaustive_test_main.cc",
+        "exhaustive_unary_f32_or_smaller_test.cc",
+    ],
     backends = [
         "gpu",
         "cpu",
     ],
-    shard_count = 48,
+    real_hardware_only = True,  # Very slow on the interpreter.
+    shard_count = 50,
     tags = [
         "optonly",
+        "test_xla_cpu_thunks",
+        # This is a big test that we skip for capacity reasons in OSS testing.
+        "no_oss",
+    ],
+    deps = [
+        "//xla:types",
+        "//xla:util",
+        "//xla/client:xla_builder",
+        "//xla/client/lib:math",
+        "//xla/tests:client_library_test_base",
+        "//xla/tests/exhaustive:exhaustive_op_test_utils",
+        "@com_google_absl//absl/flags:flag",
+        "@local_tsl//tsl/platform",
+        "@local_tsl//tsl/platform:test",
+    ],
+)
+
+xla_test(
+    name = "exhaustive_unary_f64_test",
+    srcs = ["exhaustive_unary_f64_test.cc"],
+    backends = [
+        "gpu",
+        "cpu",
+    ],
+    shard_count = 50,
+    tags = [
+        "optonly",
+        "test_xla_cpu_thunks",
         # This is a big test that we skip for capacity reasons in OSS testing.
         "no_oss",
         # TODO(b/151340488): Timed out on 2020-03-18.
@@ -77,27 +97,35 @@ xla_test(
     deps = [
         ":exhaustive_op_test_utils",
         "//xla:util",
+        "//xla/client:xla_builder",
         "//xla/tests:client_library_test_base",
+        "//xla/tests:xla_internal_test_main",
     ],
 )
 
 xla_test(
-    name = "exhaustive_unary_test_complex",
-    srcs = ["exhaustive_unary_test_complex.cc"],
+    name = "exhaustive_unary_complex_test",
+    srcs = ["exhaustive_unary_complex_test.cc"],
     backends = [
         "gpu",
         "cpu",
     ],
-    shard_count = 48,
+    shard_count = 50,
     tags = [
         "optonly",
+        "test_xla_cpu_thunks",
         # This is a big test that we skip for capacity reasons in OSS testing.
         "no_oss",
     ],
     deps = [
         ":exhaustive_op_test_utils",
-        "//xla:util",
+        "//xla:types",
+        "//xla/client:xla_builder",
         "//xla/tests:client_library_test_base",
+        "//xla/tests:literal_test_util",
+        "//xla/tests:test_macros_header",
+        "//xla/tests:xla_internal_test_main",
+        "@com_google_absl//absl/types:span",
     ],
 )
 
@@ -108,14 +136,16 @@ xla_test(
         "gpu",
         "cpu",
     ],
-    shard_count = 48,
+    shard_count = 50,
     tags = [
         "optonly",
+        "test_xla_cpu_thunks",
         # This is a big test that we skip for capacity reasons in OSS testing.
         "no_oss",
     ],
     deps = [
         ":exhaustive_op_test_utils",
+        "//xla/tests:xla_internal_test_main",
     ],
 )
 
@@ -126,13 +156,15 @@ xla_test(
         "gpu",
         "cpu",
     ],
-    shard_count = 48,
+    shard_count = 50,
     tags = [
         "optonly",
+        "test_xla_cpu_thunks",
         # This is a big test that we skip for capacity reasons in OSS testing.
         "no_oss",
     ],
     deps = [
         ":exhaustive_op_test_utils",
+        "//xla/tests:xla_internal_test_main",
     ],
 )

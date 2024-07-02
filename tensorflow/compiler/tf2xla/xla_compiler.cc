@@ -38,6 +38,7 @@ limitations under the License.
 #include "tensorflow/compiler/jit/flags.h"
 #include "tensorflow/compiler/jit/shape_inference.h"
 #include "tensorflow/compiler/jit/xla_compile_util.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/attribute_utils.h"
 #include "tensorflow/compiler/mlir/tf2xla/api/v1/compile_mlir_util.h"
 #include "tensorflow/compiler/mlir/utils/array_container_utils.h"
 #include "tensorflow/compiler/tf2xla/graph_compiler.h"
@@ -83,6 +84,12 @@ limitations under the License.
 
 namespace tensorflow {
 namespace {
+
+// Name of component for error logging. This name is fixed and required to
+// enable logging.
+constexpr char kSingleOpComponent[] = "TF2XLA_XLA_COMPILER_COMPILE_SINGLE_OP";
+constexpr char kCompileFunctionComponent[] =
+    "TF2XLA_XLA_COMPILER_COMPILE_FUNCTION";
 
 // Checks that arguments `args` match types `types`.
 Status CheckSignature(const DataTypeVector& types,
@@ -770,6 +777,9 @@ Status XlaCompiler::CompileSingleOp(
     tensorflow::metrics::IncrementPhase2XlaCompilerCounter(
         tensorflow::metrics::Phase2XlaCompilerMetric::
             kCompileSingleOpXlaBuilderFailure);
+    tsl::error_logging::Log(mlir::TF::kBridgeComponent, kSingleOpComponent,
+                            status.ToString())
+        .IgnoreError();
   }
   return status;
 }
@@ -862,12 +872,7 @@ Status XlaCompiler::CompileFunction(
 
   VLOG(1) << "====================================================";
 
-  auto state = ConfigProto::Experimental::MLIR_BRIDGE_ROLLOUT_DISABLED;
-  if (options.is_entry_computation) {
-    state = GetMlirBridgeRolloutState(config_proto);
-  }
-
-  VLOG(1) << "MLIR bridge off. Using the old bridge to compile the function";
+  VLOG(1) << "CompileFunction with XlaBuilder";
   auto status =
       CompileGraph(options, function_id, std::move(graph), args, result);
   if (!status.ok()) {
@@ -880,6 +885,9 @@ Status XlaCompiler::CompileFunction(
         ". Run with TF_DUMP_GRAPH_PREFIX=/path/to/dump/dir and "
         "--vmodule=xla_compiler=2 to obtain a dump of the compiled "
         "functions.");
+    tsl::error_logging::Log(mlir::TF::kBridgeComponent,
+                            kCompileFunctionComponent, status.ToString())
+        .IgnoreError();
     return status;
   }
 
@@ -902,7 +910,7 @@ Status XlaCompiler::XLAShapeForArgument(
     case XlaCompiler::Argument::kParameter: {
       if (is_entry_computation) {
         TensorShape shape;
-        if (absl::holds_alternative<TensorShape>(arg.shape)) {
+        if (std::holds_alternative<TensorShape>(arg.shape)) {
           shape = std::get<TensorShape>(arg.shape);
         } else {
           TF_RETURN_IF_ERROR(
@@ -920,16 +928,17 @@ Status XlaCompiler::XLAShapeForArgument(
             arg_sharding, /*use_fast_memory=*/false,
             options_.shape_determination_fns, xla_shape));
         // If the arg is dynamic then we update the shape to reflect that. The
-        // arg's value_dynamism is a Tensor of bools set to the dynamism of each
-        // dimension.
-        if (arg.value_dynamism.has_value()) {
-          auto dynamism = arg.value_dynamism.value().vec<bool>();
-          for (int i = 0; i < dynamism.size(); ++i) {
-            xla_shape->set_dynamic_dimension(i, dynamism(i));
+        // layout etc above lose it by forcing a swap to TensorShape.
+        if (std::holds_alternative<xla::Shape>(arg.shape) &&
+            std::get<xla::Shape>(arg.shape).is_dynamic()) {
+          xla::Shape dynamic_shape = std::get<xla::Shape>(arg.shape);
+          for (int i = 0; i < xla_shape->dimensions_size(); ++i) {
+            xla_shape->set_dynamic_dimension(
+                i, dynamic_shape.is_dynamic_dimension(i));
           }
         }
       } else {
-        if (absl::holds_alternative<xla::Shape>(arg.shape)) {
+        if (std::holds_alternative<xla::Shape>(arg.shape)) {
           *xla_shape = std::get<xla::Shape>(arg.shape);
         } else {
           TF_RETURN_IF_ERROR(TensorShapeToXLAShape(

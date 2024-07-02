@@ -10,6 +10,7 @@ package(
         # For TFLite Converter integration.
         "//tensorflow/compiler/mlir/lite:__subpackages__",
         "//tensorflow/compiler/mlir/quantization:__subpackages__",
+        "//tensorflow/compiler/mlir/tensorflow_to_stablehlo:__subpackages__",
     ],
     licenses = ["notice"],
 )
@@ -40,6 +41,8 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         "//tensorflow/compiler/mlir/quantization/stablehlo:quantization_config_proto_cc",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -157,9 +160,9 @@ cc_library(
         "//tensorflow/compiler/mlir/quantization/tensorflow/cc:run_passes",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:unfreeze_constants",
         "//tensorflow/compiler/mlir/tensorflow",
-        "//tensorflow/compiler/mlir/tensorflow:export_graphdef",
         "//tensorflow/compiler/mlir/tensorflow:mlir_roundtrip_flags",
         "//tensorflow/compiler/mlir/tensorflow/transforms:verify_no_outside_compilation_markers_pass",
+        "//tensorflow/compiler/mlir/tf2xla/api/v2:tf_executor_to_graph",
         "//tensorflow/core:core_cpu_base",
         "//tensorflow/core:framework",
         "//tensorflow/core:protos_all_cc",
@@ -264,6 +267,7 @@ cc_library(
         "@llvm-project//mlir:ReconcileUnrealizedCasts",
         "@llvm-project//mlir:Transforms",
         "@local_xla//xla/mlir_hlo:mhlo_passes",
+        "@stablehlo//:stablehlo_passes",
     ],
 )
 
@@ -373,8 +377,10 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         ":component",
+        ":config",
         ":pass_pipeline",
         "//tensorflow/compiler/mlir/quantization/stablehlo:quantization_config_proto_cc",
+        "//tensorflow/compiler/mlir/quantization/stablehlo/instrumentations:save_report",
         "//tensorflow/compiler/mlir/quantization/tensorflow:passes",
         "//tensorflow/compiler/mlir/quantization/tensorflow/cc:run_passes",
         "@com_google_absl//absl/base:nullability",
@@ -444,12 +450,14 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         ":component",
+        ":config",
         ":context",
         ":pass_pipeline",
         ":saved_model_export",
         ":saved_model_import",
         ":types",
         "//tensorflow/compiler/mlir/quantization/stablehlo:quantization_config_proto_cc",
+        "//tensorflow/compiler/mlir/quantization/stablehlo/instrumentations:save_report",
         "//tensorflow/compiler/mlir/quantization/tensorflow:passes",
         "//tensorflow/compiler/mlir/quantization/tensorflow/cc:run_passes",
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:py_function_lib",

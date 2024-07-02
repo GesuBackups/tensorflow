@@ -31,8 +31,10 @@ from tensorflow.compiler.mlir.quantization.stablehlo import quantization_config_
 from tensorflow.compiler.mlir.quantization.tensorflow.python import representative_dataset as rd
 from tensorflow.core.framework import graph_pb2 as _graph_pb2
 from tensorflow.lite.experimental.microfrontend.python.ops import audio_microfrontend_op  # pylint: disable=unused-import
+from tensorflow.lite.profiling.proto import profiling_info_pb2  # pylint: disable=unused-import
 from tensorflow.lite.python import conversion_metadata_schema_py_generated as conversion_metadata_fb
 from tensorflow.lite.python import lite_constants as constants
+from tensorflow.lite.python.convert import build_conversion_flags as _build_conversion_flags
 from tensorflow.lite.python.convert import convert_graphdef as _convert_graphdef
 from tensorflow.lite.python.convert import convert_graphdef_with_arrays as _convert_graphdef_with_arrays
 from tensorflow.lite.python.convert import convert_jax_hlo as _convert_jax_hlo
@@ -55,13 +57,14 @@ from tensorflow.lite.python.op_hint import convert_op_hints_to_stubs  # pylint: 
 from tensorflow.lite.python.op_hint import is_ophint_converted as _is_ophint_converted
 from tensorflow.lite.python.op_hint import OpHint  # pylint: disable=unused-import
 from tensorflow.lite.python.optimize import calibrator as _calibrator
-from tensorflow.lite.python.util import _xla_computation
+from tensorflow.lite.python.util import _jit
 from tensorflow.lite.python.util import build_debug_info_func as _build_debug_info_func
 from tensorflow.lite.python.util import convert_debug_info_func as _convert_debug_info_func
 from tensorflow.lite.python.util import freeze_graph as _freeze_graph
 from tensorflow.lite.python.util import get_debug_info as _get_debug_info
 from tensorflow.lite.python.util import get_grappler_config as _get_grappler_config
 from tensorflow.lite.python.util import get_model_hash as _get_model_hash
+from tensorflow.lite.python.util import get_save_spec as _get_save_spec
 from tensorflow.lite.python.util import get_sparsity_modes as _get_sparsity_modes
 from tensorflow.lite.python.util import get_tensor_name as _get_tensor_name
 from tensorflow.lite.python.util import get_tensors_from_tensor_names as _get_tensors_from_tensor_names
@@ -84,6 +87,7 @@ from tensorflow.python.framework import byte_swap_tensor as bst
 from tensorflow.python.framework import convert_to_constants as _convert_to_constants
 from tensorflow.python.framework import dtypes as _dtypes
 from tensorflow.python.framework import ops as _ops
+from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import versions
 from tensorflow.python.framework.errors_impl import NotFoundError as _NotFoundError
 from tensorflow.python.framework.importer import import_graph_def as _import_graph_def
@@ -97,6 +101,7 @@ from tensorflow.python.saved_model.load import load as _load
 from tensorflow.python.saved_model.loader_impl import parse_saved_model_with_debug_info as _parse_saved_model_with_debug_info
 from tensorflow.python.util import deprecation as _deprecation
 from tensorflow.python.util import keras_deps
+from tensorflow.python.util import nest
 from tensorflow.python.util.tf_export import tf_export as _tf_export
 
 
@@ -714,6 +719,7 @@ class TFLiteConverterBase:
       bias_type,
       allow_float,
       enable_variable_quantization,
+      debug_options,
   ):
     """Quantize the model."""
     # pylint: disable=protected-access
@@ -755,6 +761,7 @@ class TFLiteConverterBase:
           output_data_type=output_type,
           enable_variable_quantization=enable_variable_quantization,
           disable_per_channel_for_dense_layers=self._experimental_disable_per_channel_quantization_for_dense_layers,
+          debug_options_str=debug_options.SerializeToString(),
       )
     else:
       return calibrate_quantize.calibrate_and_quantize(
@@ -1095,7 +1102,9 @@ class TFLiteConverterBase:
     self._tflite_metrics.set_converter_latency(value)
 
   @convert_phase(Component.OPTIMIZE_TFLITE_MODEL)
-  def _optimize_tflite_model(self, model, quant_mode, quant_io=True):
+  def _optimize_tflite_model(
+      self, model, quant_mode, debug_options, quant_io=True
+  ):
     """Apply optimizations on a TFLite model."""
 
     # Disable TFLite quantization pass when
@@ -1123,6 +1132,7 @@ class TFLiteConverterBase:
             q_bias_type,
             q_allow_float,
             q_variable_quantization,
+            debug_options,
         )
 
       m_in_type = in_type if in_type else _dtypes.float32
@@ -1412,7 +1422,10 @@ class TFLiteConverterBaseV2(TFLiteConverterBase):
 
     result = _convert_saved_model(**converter_kwargs)
     return self._optimize_tflite_model(
-        result, quant_mode, quant_io=self.experimental_new_quantizer
+        result,
+        quant_mode,
+        _build_conversion_flags(**converter_kwargs).debug_options,
+        quant_io=self.experimental_new_quantizer,
     )
 
   def convert(self, graph_def, input_tensors, output_tensors):
@@ -1458,7 +1471,10 @@ class TFLiteConverterBaseV2(TFLiteConverterBase):
     )
 
     return self._optimize_tflite_model(
-        result, self._quant_mode, quant_io=self.experimental_new_quantizer
+        result,
+        self._quant_mode,
+        _build_conversion_flags(**converter_kwargs).debug_options,
+        quant_io=self.experimental_new_quantizer,
     )
 
 
@@ -1580,11 +1596,57 @@ class TFLiteKerasModelConverterV2(TFLiteConverterBaseV2):
       output_tensors: List of output tensors.
     """
     try:
-      _save.save(
-          self._keras_model,
-          output_dir,
-          options=_save_options.SaveOptions(save_debug_info=True),
-      )
+
+      def _is_keras_3():
+        """Returns true if _keras_model is a Keras 3+ model."""
+        try:
+          import keras  # pylint: disable=g-import-not-at-top
+
+          return keras.__version__.startswith("3") and isinstance(
+              self._keras_model, keras.layers.Layer
+          )
+        except ImportError:
+          return False
+
+      if _is_keras_3():
+        import keras  # pylint: disable=g-import-not-at-top
+
+        # Keras 3 model `export` by default saves model.__call__ with
+        # training=True. Need to export the model call with training=False for
+        # inference only and TFLite conversion.
+        export_archive = keras.export.ExportArchive()
+        export_archive.track(self._keras_model)
+        if isinstance(
+            self._keras_model,
+            (keras.src.models.Functional, keras.src.models.Sequential),
+        ):
+          input_signature = nest.map_structure(
+              lambda x: tensor_spec.TensorSpec(
+                  x.shape, dtype=x.dtype, name=x.name
+              ),
+              self._keras_model.inputs,
+          )
+          if isinstance(input_signature, list) and len(input_signature) > 1:
+            input_signature = [input_signature]
+        else:
+          save_spec = _get_save_spec(self._keras_model)
+          if not save_spec:
+            raise ValueError(
+                "The model provided has never been called. "
+                "It must be called at least once before export."
+            )
+          input_signature = [save_spec]
+        inference_fn = functools.partial(
+            self._keras_model.__call__, training=False
+        )
+        export_archive.add_endpoint("serve", inference_fn, input_signature)
+        export_archive.write_out(output_dir)
+      else:
+        _save.save(
+            self._keras_model,
+            output_dir,
+            options=_save_options.SaveOptions(save_debug_info=True),
+        )
     except Exception:  # pylint: disable=broad-except
       # When storing the given keras model to a saved model is failed, let's
       # use original keras model conversion pipeline.
@@ -1919,15 +1981,15 @@ class TFLiteJaxConverterV2(TFLiteConverterBaseV2):
 
     Raises:
       ImportError:
-        If cannot import the xla_computation from jax.
+        If cannot import the jit from jax.
       ValueError:
         No serving function is specified.
         Input tensors are not specified.
         The truth value of an array with more than one element is ambiguous.
         Failed to convert the given Jax function to hlo.
     """
-    if not _xla_computation:
-      raise ImportError("Cannot import xla_computation from jax.")
+    if not _jit:
+      raise ImportError("Cannot import jit from jax.")
 
     if not self._serving_funcs:
       raise ValueError("No serving func is specified.")
@@ -1962,10 +2024,13 @@ class TFLiteJaxConverterV2(TFLiteConverterBaseV2):
       ordered_inputs.append(tensor)
 
     try:
-      xla_compuation = _xla_computation(self._serving_funcs[0], backend="cpu")
-      hlo_proto = xla_compuation(
-          *ordered_inputs
-      ).as_serialized_hlo_module_proto()
+      hlo_proto = (
+          _jit(self._serving_funcs[0])
+          .trace(*ordered_inputs)
+          .lower(lowering_platforms=("cpu",))
+          .compiler_ir("hlo")
+          .as_serialized_hlo_module_proto()
+      )
     except Exception:  # pylint: disable=broad-except
       raise ValueError("Failed to convert the given Jax function to hlo.")
 
@@ -1987,7 +2052,10 @@ class TFLiteJaxConverterV2(TFLiteConverterBaseV2):
     result = _convert_jax_hlo(**converter_kwargs)
 
     return self._optimize_tflite_model(
-        result, quant_mode, quant_io=self.experimental_new_quantizer
+        result,
+        quant_mode,
+        _build_conversion_flags(**converter_kwargs).debug_options,
+        quant_io=self.experimental_new_quantizer,
     )
 
 
@@ -2523,7 +2591,10 @@ class TFLiteConverterBaseV1(TFLiteConverterBase):
       )
 
     return self._optimize_tflite_model(
-        result, quant_mode, quant_io=self.experimental_new_quantizer
+        result,
+        quant_mode,
+        _build_conversion_flags(**converter_kwargs).debug_options,
+        quant_io=self.experimental_new_quantizer,
     )
 
   def get_input_arrays(self):

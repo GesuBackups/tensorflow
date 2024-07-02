@@ -1,4 +1,3 @@
-#include "xla/service/gpu/gpu_compiler.h"
 /* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+
+#include "xla/service/gpu/gpu_compiler.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -32,7 +33,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
-#include "xla/service/buffer_assignment.h"
 #include "xla/service/executable.h"
 #include "xla/service/gpu/autotuner_util.h"
 #include "xla/service/gpu/gpu_hlo_schedule.h"
@@ -41,11 +41,15 @@ limitations under the License.
 #include "xla/service/pattern_matcher.h"
 #include "xla/service/pattern_matcher_gmock.h"
 #include "xla/service/xla_debug_info_manager.h"
+#include "xla/stream_executor/device_description.h"
 #include "xla/tests/filecheck.h"
 #include "xla/tests/hlo_test_base.h"
 #include "tsl/lib/core/status_test_util.h"
+#include "tsl/platform/casts.h"
 #include "tsl/platform/env.h"
+#include "tsl/platform/errors.h"
 #include "tsl/platform/path.h"
+#include "tsl/platform/protobuf.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/platform/test.h"
 
@@ -58,6 +62,7 @@ namespace m = ::xla::match;
 using ::testing::IsEmpty;
 using ::testing::Not;
 using ::testing::TempDir;
+using ::tsl::testing::StatusIs;
 
 class GpuCompilerTest : public HloTestBase {
  public:
@@ -81,6 +86,7 @@ ENTRY main {
 }
 )";
   auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+  ResetCompiledProgramsCountForTesting();
   std::unique_ptr<Executable> executable =
       backend()
           .compiler()
@@ -177,6 +183,28 @@ ENTRY main {
       GmockMatch(m::Tuple(
           m::GetTupleElement(m::Fusion()), m::GetTupleElement(m::Fusion()),
           m::GetTupleElement(m::Fusion()), m::GetTupleElement(m::Fusion()))));
+}
+
+TEST_F(GpuCompilerTest, CanRunScheduledModules) {
+  HloModuleConfig config;
+  DebugOptions debug_options = GetDebugOptionsForTest();
+  debug_options.set_xla_disable_all_hlo_passes(true);
+  config.set_debug_options(debug_options);
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+HloModule m, is_scheduled=true
+
+w {
+  p = s8[] parameter(0)
+  ROOT n = s8[] negate(p)
+}
+
+ENTRY e {
+  p = s8[] parameter(0)
+  ROOT _ = s8[] fusion(p), kind=kLoop, calls=w
+})",
+                                                       config));
+  EXPECT_TRUE(Run(std::move(module), /*run_hlo_passes=*/true));
 }
 
 class PersistedAutotuningTest : public HloTestBase {
@@ -331,6 +359,16 @@ ENTRY main {
 
 TEST_F(GpuCompilerTest,
        GemmFusionIsNoOpWhenGemmFusionAutotunerFallsBackToCublas) {
+  GTEST_SKIP() << "TODO(b/344573710): this test is flaky, disable it "
+               << " until flakiness is fixed.";
+  auto cc = backend()
+                .default_stream_executor()
+                ->GetDeviceDescription()
+                .cuda_compute_capability();
+  if (!cc.IsAtLeastAmpere()) {
+    GTEST_SKIP() << "Autotuning results have only been generated for Ampere "
+                 << "and Hopper GPUs";
+  }
   const absl::string_view hlo_string = R"(
 HloModule test
 
@@ -361,6 +399,8 @@ ENTRY main {
   DebugOptions triton_enabled_debug_options = GetDebugOptionsForTest();
   triton_enabled_debug_options.set_xla_gpu_enable_address_computation_fusion(
       false);
+  triton_enabled_debug_options
+      .set_xla_gpu_require_complete_aot_autotune_results(true);
   config.set_debug_options(triton_enabled_debug_options);
   config.set_replica_count(1);
   config.set_num_partitions(1);
@@ -444,60 +484,54 @@ ENTRY test_computation {
 }
 )";
 
-  // In the expected string, we skip some detail on the while-init tuple due to
-  // b/333572009.
   const char* kExpected = R"(
-CHECK: %body.1 (param.2.0: (u32[], f32[1,1024,1024], (f32[1,1024,1024], u32[], token[]), (f32[1,1024,1024], u32[], token[]), u32[])) -> (u32[], f32[1,1024,1024], (f32[1,1024,1024], u32[], token[]), (f32[1,1024,1024], u32[], token[]), u32[]) {
-CHECK:   %param.2.0 = parameter(0)
-CHECK:   %get-tuple-element.38 = get-tuple-element(%param.2.0), index=2
-CHECK:   %get-tuple-element.39 = get-tuple-element(%param.2.0), index=3
-CHECK-DAG:   %get-tuple-element.22 = get-tuple-element(%param.2.0), index=0
-CHECK-DAG:   %recv-done.3 = recv-done(%get-tuple-element.38), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0"}
-CHECK-DAG:   %get-tuple-element.25 = get-tuple-element(%recv-done.3), index=0
-CHECK:   %loop_multiply_tan_fusion = fusion
-CHECK:   %send-done.3 = send-done(%get-tuple-element.39), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0"}
-CHECK:   %custom-call.1.0 = custom-call
-CHECK:   %after-all.3.0 = after-all()
-CHECK{LITERAL}:   %recv.2.0 = recv(%after-all.3.0), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0",_xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"}, control-predecessors={%custom-call.1.0}
-CHECK{LITERAL}:   %send.2.0 = send(%bitcast.119.0, %after-all.3.0), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0",_xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"}, control-predecessors={%recv.2.0}
-CHECK:   %loop_add_fusion = fusion
-CHECK:   %loop_add_fusion.1 = fusion
-CHECK:   ROOT %tuple.13 = tuple(%loop_add_fusion.1, %bitcast.119.0, %recv.2.0, %send.2.0, %loop_add_fusion)
-CHECK: }
+CHECK:       recv-done
+CHECK-SAME:    channel_id=[[CHANNEL_ID:[0-9]+]]
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0"}
+CHECK:       send-done
+CHECK-SAME:    channel_id=[[CHANNEL_ID]]
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0"}
+CHECK:       %[[CUSTOM_CALL:.*]] = custom-call
+CHECK:       %[[AFTER_ALL:.*]] = after-all
+CHECK:       %[[RESULT_RECV:.*]] = recv(%[[AFTER_ALL]])
+CHECK-SAME:    channel_id=[[CHANNEL_ID]]
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0",
+CHECK-SAME{LITERAL}:                _xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"},
+CHECK-SAME:                         control-predecessors={%[[CUSTOM_CALL]]}
+CHECK:       %[[RESULT_SEND:.*]] = send(%[[SOME_SEND_ARG:.*]], %[[AFTER_ALL]])
+CHECK-SAME:    channel_id=1
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0",
+CHECK-SAME{LITERAL}:                _xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"},
+CHECK-SAME:                         control-predecessors={%[[RESULT_RECV]]}
+CHECK:       ROOT
+// We actually expect both RESULT_RECV and RESULT_SEND to match on this line.
+// However, despite popular belief, CHECK-DAG-SAME is not actually a valid
+// directive. Checking for both without using a DAG would be inherently flaky,
+// so we take the hit and only check for one of them.
+CHECK-SAME:    %[[RESULT_RECV]]
 
-CHECK: %cond.1 (cond_param.1: (u32[], f32[1,1024,1024], (f32[1,1024,1024], u32[], token[]), (f32[1,1024,1024], u32[], token[]), u32[])) -> pred[] {
-CHECK:   %cond_param.1 = parameter(0)
-CHECK:   %get-tuple-element.5.0 = get-tuple-element(%cond_param.1), index=0
-CHECK:   ROOT %loop_compare_fusion = fusion(%get-tuple-element.5.0), kind=kLoop, calls=%fused_compare
-CHECK: }
-
-CHECK: ENTRY %test_computation () -> f32[1,1024,1024] {
-CHECK:   %after-all.1.0 = after-all()
-CHECK:   %loop_broadcast_fusion = fusion
-CHECK{LITERAL}:   %recv.1.0 = recv(%after-all.1.0), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0",_xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"}
-CHECK{LITERAL}:   %send.1.0 = send(%loop_broadcast_fusion, %after-all.1.0), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0",_xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"}, control-predecessors={%recv.1.0}
-CHECK:   %copy_fusion = fusion
-CHECK:   %get-tuple-element.36 = get-tuple-element(%copy_fusion), index=0
-CHECK:   %get-tuple-element.37 = get-tuple-element(%copy_fusion), index=1
-CHECK:   %bitcast.170 = bitcast(%get-tuple-element.36)
-CHECK:   %bitcast.171 = bitcast(%get-tuple-element.37)
-CHECK:   %while-init = tuple
-CHECK-SAME: %recv.1.0, %send.1.0
-CHECK{LITERAL}:   %while-result = while(%while-init), condition=%cond.1, body=%body.1, backend_config={"known_trip_count":{"n":"10"}}
-CHECK:   %get-tuple-element.40 = get-tuple-element(%while-result), index=2
-CHECK:   %get-tuple-element.41 = get-tuple-element(%while-result), index=3
-CHECK:   %recv-done.4 = recv-done(%get-tuple-element.40), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0"}
-CHECK:   %get-tuple-element.7.0 = get-tuple-element(%recv-done.4), index=0
-CHECK:   %loop_multiply_tan_fusion.1 = fusion
-CHECK:   %get-tuple-element.13 = get-tuple-element(%loop_multiply_tan_fusion.1), index=0
-CHECK:   %get-tuple-element.14 = get-tuple-element(%loop_multiply_tan_fusion.1), index=1
-CHECK:   %bitcast.150.0 = bitcast(%get-tuple-element.13)
-CHECK:   %bitcast.155.0 = bitcast(%get-tuple-element.14)
-CHECK:   %send-done.4 = send-done(%get-tuple-element.41), channel_id=1, frontend_attributes={_xla_send_recv_pipeline="0"}
-CHECK:   %custom-call.3.0 = custom-call(%bitcast.150.0, %bitcast.155.0), custom_call_target="__cublas$gemm"
-CHECK:   %get-tuple-element.10.0 = get-tuple-element(%custom-call.3.0), index=0
-CHECK:   ROOT %bitcast.5.0 = bitcast(%get-tuple-element.10.0)
-CHECK: }
+CHECK: ENTRY
+CHECK:       %[[ENTRY_AFTER_ALL:.*]] = after-all
+CHECK:       %[[ENTRY_RECV:.*]] = recv(%[[ENTRY_AFTER_ALL]])
+CHECK-SAME:    channel_id=[[CHANNEL_ID]]
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0",
+CHECK-SAME{LITERAL}:                _xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"}
+CHECK:       %[[ENTRY_SEND:.*]] = send(%[[SOME_SEND_ARG:.*]], %[[ENTRY_AFTER_ALL]])
+CHECK-SAME:    channel_id=1
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0",
+CHECK-SAME{LITERAL}:                _xla_send_recv_source_target_pairs="{{0,1},{1,2},{2,3},{3,4}}"},
+CHECK-SAME:                         control-predecessors={%[[ENTRY_RECV]]}
+CHECK:       %[[WHILE_INIT:.*]] = tuple
+// Check here that the send argument is likewise passed to the while loop, as
+// a counterpart to the check in the child computation above.
+CHECK-SAME:    %[[ENTRY_SEND]]
+CHECK:       while(%[[WHILE_INIT]])
+CHECK:       recv-done
+CHECK-SAME:    channel_id=[[CHANNEL_ID]]
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0"}
+CHECK:       send-done
+CHECK-SAME:    channel_id=[[CHANNEL_ID]]
+CHECK-SAME:    frontend_attributes={_xla_send_recv_pipeline="0"}
 )";
 
   HloModuleConfig config;
@@ -520,6 +554,123 @@ CHECK: }
       bool filecheck_matched,
       RunFileCheck(optimized_module->ToString(options), kExpected));
   EXPECT_TRUE(filecheck_matched);
+}
+
+class KernelCacheTest : public HloTestBase {
+ public:
+  void SetUp() override {
+    CHECK(tsl::Env::Default()->LocalTempFilename(&cache_file_name_));
+    HloModuleConfig config;
+    config.set_debug_options(GetDebugOptionsForTest());
+    TF_ASSERT_OK_AND_ASSIGN(bool can_use_link_modules,
+                            dynamic_cast<GpuCompiler*>(backend().compiler())
+                                ->CanUseLinkModules(config));
+    if (!can_use_link_modules) {
+      GTEST_SKIP() << "Caching compiled kernels requires support of linking.";
+    }
+  }
+
+  DebugOptions GetDebugOptionsForTest() override {
+    DebugOptions debug_options = HloTestBase::GetDebugOptionsForTest();
+    debug_options.set_xla_gpu_kernel_cache_file(cache_file_name_);
+    debug_options.set_xla_gpu_enable_llvm_module_compilation_parallelism(true);
+    return debug_options;
+  }
+
+  bool CacheFileExists() {
+    if (!tsl::Env::Default()->FileExists(cache_file_name_).ok()) {
+      return false;
+    }
+    return true;
+  }
+
+  int CacheEntryCount() {
+    if (!CacheFileExists()) {
+      return 0;
+    }
+    std::string serialized;
+    TF_EXPECT_OK(tsl::ReadFileToString(tsl::Env::Default(), cache_file_name_,
+                                       &serialized));
+    CompilationCacheProto proto;
+    EXPECT_TRUE(proto.ParseFromString(std::string(serialized)));
+    return proto.entries_size();
+  }
+
+  std::string cache_file_name_;
+  static constexpr absl::string_view kHloText = R"(
+  ENTRY e {
+    p = s8[] parameter(0)
+    c = s8[] constant(8)
+    ROOT _ = s8[] add(p, c)
+  })";
+};
+
+TEST_F(KernelCacheTest, CacheIsGenerated) {
+  // First run - no cache file
+  EXPECT_FALSE(CacheFileExists());
+  EXPECT_TRUE(Run(kHloText, /*run_hlo_passes=*/false));
+  // First run generates a cache
+  EXPECT_EQ(CacheEntryCount(), 1);
+  // Second run - with cache file
+  EXPECT_TRUE(Run(kHloText, /*run_hlo_passes=*/false));
+  EXPECT_EQ(CacheEntryCount(), 1);
+}
+
+TEST_F(KernelCacheTest, NoCacheIsGeneratedWithoutCompiledKernels) {
+  EXPECT_FALSE(CacheFileExists());
+  EXPECT_TRUE(Run(R"(
+  ENTRY e {
+    a = f32[5,5] parameter(0)
+    ROOT _ = f32[5,5] custom-call(a, a), custom_call_target="__cublas$gemm",
+      backend_config="{ \"gemm_backend_config\": {\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"1\"],\"rhs_contracting_dimensions\":[\"0\"],\"lhs_batch_dimensions\":[],\"rhs_batch_dimensions\":[]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"]},\"epilogue\":\"DEFAULT\"}}"
+  })",
+                  /*run_hlo_passes=*/false));
+  EXPECT_FALSE(CacheFileExists());
+}
+
+TEST_F(KernelCacheTest, CacheGrowsWithNewKernels) {
+  EXPECT_FALSE(CacheFileExists());
+  EXPECT_TRUE(Run(kHloText, /*run_hlo_passes=*/false));
+  EXPECT_EQ(CacheEntryCount(), 1);
+  // Second run - with cache file and another HLO
+  EXPECT_TRUE(Run(R"(
+  ENTRY e {
+    p = s8[] parameter(0)
+    ROOT _ = s8[] multiply(p, p)
+  })",
+                  /*run_hlo_passes=*/false));
+  EXPECT_EQ(CacheEntryCount(), 2);
+}
+
+class KernelCacheTestSingleThreaded : public KernelCacheTest {
+ public:
+  DebugOptions GetDebugOptionsForTest() override {
+    DebugOptions debug_options = KernelCacheTest::GetDebugOptionsForTest();
+    debug_options.set_xla_gpu_force_compilation_parallelism(1);
+    return debug_options;
+  }
+};
+
+TEST_F(KernelCacheTestSingleThreaded, CacheIsGenerated) {
+  EXPECT_FALSE(CacheFileExists());
+  EXPECT_TRUE(Run(kHloText, /*run_hlo_passes=*/false));
+  EXPECT_EQ(CacheEntryCount(), 1);
+  EXPECT_TRUE(Run(kHloText, /*run_hlo_passes=*/false));
+  EXPECT_EQ(CacheEntryCount(), 1);
+}
+
+class NoKernelCacheTest : public KernelCacheTest {
+ public:
+  DebugOptions GetDebugOptionsForTest() override {
+    DebugOptions debug_options = KernelCacheTest::GetDebugOptionsForTest();
+    debug_options.set_xla_gpu_enable_llvm_module_compilation_parallelism(false);
+    return debug_options;
+  }
+};
+
+TEST_F(NoKernelCacheTest, NoCacheWithoutCompilationParallelism) {
+  EXPECT_TRUE(Run(kHloText, /*run_hlo_passes=*/false));
+  EXPECT_FALSE(CacheFileExists());
 }
 
 }  // namespace

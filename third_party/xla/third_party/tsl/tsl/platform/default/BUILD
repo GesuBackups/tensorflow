@@ -5,6 +5,7 @@ load(
     "@local_xla//xla/tsl:tsl.bzl",
     "if_not_fuchsia",
     "if_not_windows",
+    "if_oss",
     "internal_visibility",
     "tsl_copts",
 )
@@ -95,10 +96,9 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_nccl//:nccl_config",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_tensorrt//:tensorrt_headers",
-    ],
+    ] + if_oss(["@local_config_nccl//:nccl_config"]),
 )
 
 cc_library(
@@ -235,8 +235,11 @@ cc_library(
     deps = [
         "//tsl/platform:errors",
         "//tsl/platform:protobuf",
-        "//tsl/platform:status",
         "//tsl/platform:strcat",
+        "//tsl/platform:stringpiece",
+        "//tsl/platform:types",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
     ],
 )
 
@@ -465,6 +468,7 @@ cc_library(
         "//tsl/platform:strcat",
         "//tsl/platform:stringpiece",
         "//tsl/platform:types",
+        "//tsl/profiler/backends/cpu:threadpool_listener_state",
     ],
     alwayslink = True,
 )
@@ -546,12 +550,24 @@ cc_library(
 bzl_library(
     name = "cuda_build_defs_bzl",
     srcs = ["cuda_build_defs.bzl"],
+    # copybara:uncomment_begin
+    # test_tags = [
+    # "manual",
+    # "notap",
+    # ],
+    # copybara:uncomment_end
     visibility = internal_visibility(["//tensorflow:__subpackages__"]),
 )
 
 bzl_library(
     name = "rules_cc_bzl",
     srcs = ["rules_cc.bzl"],
+)
+
+bzl_library(
+    name = "build_config_root_bzl",
+    srcs = ["build_config_root.bzl"],
+    # copybara:uncomment parse_tests = False,
 )
 
 # Export source files needed for mobile builds, which do not use granular targets.

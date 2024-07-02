@@ -19,6 +19,7 @@ limitations under the License.
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -32,11 +33,13 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -47,6 +50,7 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/array.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_cost_graph.h"
+#include "xla/hlo/experimental/auto_sharding/auto_sharding_memory.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_option.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_solver.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_strategy.h"
@@ -64,6 +68,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/ir/hlo_sharding.h"
+#include "xla/hlo/transforms/hlo_constant_splitter.h"
 #include "xla/hlo/utils/hlo_live_range.h"
 #include "xla/hlo/utils/hlo_sharding_util.h"
 #include "xla/service/buffer_value.h"
@@ -73,6 +78,7 @@ limitations under the License.
 #include "xla/service/hlo_alias_analysis.h"
 #include "xla/service/hlo_buffer.h"
 #include "xla/service/hlo_cost_analysis.h"
+#include "xla/service/hlo_dce.h"
 #include "xla/service/hlo_memory_scheduler.h"
 #include "xla/service/hlo_value.h"
 #include "xla/service/optimize_input_output_buffer_alias.h"
@@ -80,8 +86,6 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_tree.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
-#include "xla/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
@@ -92,7 +96,6 @@ namespace xla {
 namespace spmd {
 
 namespace {
-constexpr double kOverbudgetCoeff = 1e6;
 constexpr double kSaltiplier = 0.0;  // This value (0.0) disables salting.
 }  // namespace
 
@@ -122,11 +125,9 @@ double ComputeMemoryReshardingCost(const Shape& shape,
   int64_t src_n_dim = NumTileDimensions(src_sharding);
   int64_t dst_n_dim = NumTileDimensions(dst_sharding);
 
-  int64_t src_sharded_bytes = GetShardedInstructionSize(
-      shape, device_mesh.num_elements(), src_sharding);
-  double result = std::max(
-      src_sharded_bytes, GetShardedInstructionSize(
-                             shape, device_mesh.num_elements(), dst_sharding));
+  int64_t src_sharded_bytes = ByteSizeOfShapeWithSharding(shape, src_sharding);
+  double result = std::max(src_sharded_bytes,
+                           ByteSizeOfShapeWithSharding(shape, dst_sharding));
 
   if (src_n_dim != dst_n_dim && src_n_dim != -1 && dst_n_dim != -1) {
     absl::StatusOr<Shape> inter_shape = ComputeIntermediateShape(
@@ -144,11 +145,8 @@ double ComputeMemoryReshardingCost(const Shape& shape,
       result = std::max(
           result,
           static_cast<double>(std::max(
-              GetShardedInstructionSize(
-                  *inter_shape, device_mesh.num_elements(), src_inter_sharding),
-              GetShardedInstructionSize(*inter_shape,
-                                        device_mesh.num_elements(),
-                                        dst_inter_sharding))));
+              ByteSizeOfShapeWithSharding(*inter_shape, src_inter_sharding),
+              ByteSizeOfShapeWithSharding(*inter_shape, dst_inter_sharding))));
     }
   }
   return result - src_sharded_bytes;
@@ -342,7 +340,7 @@ void FollowArrayOrTokenStrategyGroup(
     const std::string name = ToStringSimple(*output_spec);
     double compute_cost = 0, communication_cost = 0;
     double memory_cost =
-        have_memory_cost ? GetBytes(shape) / output_spec->NumTiles() : 0;
+        have_memory_cost ? ByteSizeOfShapeWithSharding(shape, *output_spec) : 0;
     size_t num_in_nodes = strategy_group.in_nodes.size();
     std::vector<std::optional<HloSharding>> input_shardings(num_in_nodes,
                                                             *output_spec);
@@ -365,9 +363,8 @@ void FollowArrayOrTokenStrategyGroup(
 
 std::unique_ptr<StrategyGroup> HandlePartialReduce(
     const HloInstruction* ins, const size_t instruction_id,
-    const bool have_memory_cost, StrategyGroups& strategy_groups,
-    const ClusterEnvironment& cluster_env, StrategyMap& strategy_map,
-    const CallGraph& call_graph) {
+    StrategyGroups& strategy_groups, const ClusterEnvironment& cluster_env,
+    StrategyMap& strategy_map, const CallGraph& call_graph) {
   absl::StatusOr<int64_t> reduction_dim = GetPartialReduceReductionDim(ins);
   CHECK_OK(reduction_dim);
   const Shape& shape = ins->shape();
@@ -410,8 +407,8 @@ std::unique_ptr<StrategyGroup> HandlePartialReduce(
 
       std::string name = ToStringSimple(output_spec);
       double compute_cost = 0, communication_cost = 0;
-      double memory_cost =
-          GetBytes(ins->shape().tuple_shapes(i)) / output_spec.NumTiles();
+      double memory_cost = ByteSizeOfShapeWithSharding(
+          ins->shape().tuple_shapes(i), output_spec);
       std::pair<ReshardingCosts, ReshardingCosts> resharding_costs =
           GenerateReshardingCostsAndMissingShardingsForAllOperands(
               ins, output_spec, strategy_map, cluster_env, call_graph,
@@ -545,7 +542,8 @@ absl::StatusOr<std::unique_ptr<StrategyGroup>> FollowReduceStrategy(
       const std::string name = ToStringSimple(output_spec);
 
       double compute_cost = 0, communication_cost = 0;
-      double memory_cost = GetBytes(output_shape) / output_spec.NumTiles();
+      double memory_cost =
+          ByteSizeOfShapeWithSharding(output_shape, output_spec);
       for (int64_t mesh_dim : all_reduce_dims) {
         communication_cost += cluster_env.AllReduceCost(memory_cost, mesh_dim);
       }
@@ -721,7 +719,7 @@ void GenerateOutfeedStrategy(const HloInstruction* ins, const Shape& shape,
   }
   communication_resharding_costs.push_back({});
   memory_resharding_costs.push_back({});
-  double memory_cost = GetBytes(shape) / output_spec.NumTiles();
+  double memory_cost = ByteSizeOfShapeWithSharding(shape, output_spec);
   strategy_group->strategies.push_back(
       ShardingStrategy({"R", HloSharding::Replicate(), replicated_penalty, 0,
                         memory_cost, std::move(communication_resharding_costs),
@@ -748,7 +746,8 @@ double ComputeCommunicationCost(
         // here.
         // TODO(pratikf) Model gather communication costs in a more principled
         // and exhaustive manner.
-        return cluster_env.AllReduceCost(GetBytes(ins->shape()), mesh_dim);
+        return cluster_env.AllReduceCost(ByteSizeOfShape(ins->shape()),
+                                         mesh_dim);
       }
       return 0;
     }
@@ -774,7 +773,7 @@ void AddReplicatedStrategy(
     absl::flat_hash_set<int64_t> operands_to_consider_all_strategies_for) {
   HloSharding replicated_strategy = HloSharding::Replicate();
   HloSharding output_spec = replicated_strategy;
-  double memory_cost = GetBytes(shape) / output_spec.NumTiles();
+  double memory_cost = ByteSizeOfShapeWithSharding(shape, output_spec);
 
   CHECK_LE(operands_to_consider_all_strategies_for.size(), 1);
   if (!operands_to_consider_all_strategies_for.empty()) {
@@ -885,7 +884,7 @@ double ComputeSortCommunicationCost(const int64_t sort_dim,
                                     const Shape& shape,
                                     const ClusterEnvironment& cluster_env) {
   if (sort_dim == operand_sharded_dim) {
-    return cluster_env.AllToAllCost(GetBytes(shape), mesh_sharding_dim);
+    return cluster_env.AllToAllCost(ByteSizeOfShape(shape), mesh_sharding_dim);
   }
   return 0;
 }
@@ -910,7 +909,7 @@ void EnumerateAll1DPartition(const HloInstruction* ins, const Shape& shape,
       const std::string name = absl::StrFormat("S%d @ %d", i, j) + suffix;
       HloSharding output_spec = Tile(shape, {i}, {j}, device_mesh);
       double compute_cost = 0, communication_cost = 0;
-      double memory_cost = GetBytes(shape) / output_spec.NumTiles();
+      double memory_cost = ByteSizeOfShapeWithSharding(shape, output_spec);
 
       ReshardingCosts communication_resharding_costs;
       ReshardingCosts memory_resharding_costs;
@@ -1028,7 +1027,7 @@ void BuildStrategyAndCostForOp(const HloInstruction* ins, const Shape& shape,
                       absl::StrJoin(mesh_dims, ","));
   HloSharding output_spec = Tile(shape, tensor_dims, mesh_dims, device_mesh);
   double compute_cost = 0, communication_cost = 0;
-  double memory_cost = GetBytes(shape) / output_spec.NumTiles();
+  double memory_cost = ByteSizeOfShapeWithSharding(shape, output_spec);
   std::vector<std::optional<HloSharding>> input_shardings;
   ReshardingCosts communication_resharding_costs;
   ReshardingCosts memory_resharding_costs;
@@ -1108,7 +1107,8 @@ void EnumerateAll1DPartitionReshape(
 
       const std::string name = absl::StrFormat("S%d @ %d", i, j) + suffix;
       double compute_cost = 0, communication_cost = 0;
-      double memory_cost = GetBytes(ins->shape()) / output_spec.NumTiles();
+      double memory_cost =
+          ByteSizeOfShapeWithSharding(ins->shape(), output_spec);
 
       ReshardingCosts communication_resharding_costs{
           CommunicationReshardingCostVector(strategy_map.at(operand).get(),
@@ -1201,7 +1201,8 @@ void BuildStrategyAndCostForReshape(
       absl::StrFormat("S%s @ {%s}", absl::StrJoin(tensor_dims, ""),
                       absl::StrJoin(mesh_dims, ","));
   double compute_cost = 0, communication_cost = 0;
-  double memory_cost = GetBytes(ins->shape()) / output_spec.NumTiles();
+  double memory_cost = ByteSizeOfShapeWithSharding(ins->shape(), output_spec);
+  ;
 
   ReshardingCosts communication_resharding_costs{
       CommunicationReshardingCostVector(strategy_map.at(operand).get(),
@@ -1540,13 +1541,14 @@ void TrimOrGenerateStrategiesBasedOnExistingSharding(
               operand_shape = operand->shape().tuple_shapes(ins->tuple_index());
             }
 
-            if (input_sharding.has_value()) {
-              input_sharding = *input_sharding;
-            } else if (existing_sharding.Validate(operand_shape).ok()) {
-              input_sharding = existing_sharding;
-            } else {
-              input_sharding = HloSharding::Replicate();
+            if (!input_sharding) {
+              if (existing_sharding.Validate(operand_shape).ok()) {
+                input_sharding = existing_sharding;
+              } else {
+                input_sharding = HloSharding::Replicate();
+              }
             }
+
             CHECK(input_sharding.has_value());
 
             input_shardings.push_back(*input_sharding);
@@ -1560,7 +1562,7 @@ void TrimOrGenerateStrategiesBasedOnExistingSharding(
           }
         }
         double memory_cost =
-            GetBytes(output_shape) / existing_sharding.NumTiles();
+            ByteSizeOfShapeWithSharding(output_shape, existing_sharding);
         if (!strategy_group->strategies.empty()) {
           pretrimmed_strategy_map[strategy_group->node_idx] =
               strategy_group->strategies;
@@ -1627,27 +1629,27 @@ void CheckMemoryCosts(StrategyGroup* strategy_group, const Shape& shape) {
     for (const auto& strategy : strategy_group->strategies) {
       if (strategy.output_sharding.IsReplicated()) {
         full_mem = strategy.memory_cost;
-        size_t size = GetInstructionSize(shape);
+        size_t size = ByteSizeOfShape(shape);
         CHECK_EQ(strategy.memory_cost, size);
       }
     }
     for (const auto& strategy : strategy_group->strategies) {
       if (!strategy.output_sharding.IsReplicated() && full_mem > 0.0) {
-        CHECK_EQ(strategy.memory_cost * strategy.output_sharding.NumTiles(),
+        CHECK_GE(strategy.memory_cost * strategy.output_sharding.NumTiles(),
                  full_mem);
       }
     }
   }
 }
 
-void RemoveInvalidShardingsWithShapes(
+void RemoveShardingsWhereSmallDimsShardedAcrossManyDevices(
     const Shape& shape, StrategyGroup* strategy_group,
     const bool instruction_has_user_sharding) {
   if (strategy_group->is_tuple) {
     for (size_t i = 0; i < strategy_group->childs.size(); i++) {
-      RemoveInvalidShardingsWithShapes(shape.tuple_shapes().at(i),
-                                       strategy_group->childs[i].get(),
-                                       instruction_has_user_sharding);
+      RemoveShardingsWhereSmallDimsShardedAcrossManyDevices(
+          shape.tuple_shapes().at(i), strategy_group->childs[i].get(),
+          instruction_has_user_sharding);
     }
   } else {
     if (instruction_has_user_sharding &&
@@ -1911,7 +1913,8 @@ std::unique_ptr<StrategyGroup> CreateReshapeStrategies(
       }
       const std::string name = ToStringSimple(*output_spec);
       double compute_cost = 0, communication_cost = 0;
-      double memory_cost = GetBytes(ins->shape()) / output_spec->NumTiles();
+      double memory_cost =
+          ByteSizeOfShapeWithSharding(ins->shape(), output_spec);
       std::vector<double> communication_resharding_costs =
           CommunicationReshardingCostVector(
               src_strategy_group, operand->shape(),
@@ -1948,6 +1951,10 @@ AutoShardingSolverResult CallSolver(
     const HloModule& hlo_module, const HloLiveRange& hlo_live_range,
     const StrategyMap& strategy_map, const StrategyGroups& strategy_groups,
     const CostGraph& cost_graph, const AliasSet& alias_set,
+    const std::vector<std::pair<LivenessIdx, LivenessIdx>>& node_intervals,
+    const std::vector<std::pair<LivenessIdx, LivenessIdx>>& edge_intervals,
+    const std::vector<absl::btree_set<int64_t>>& node_groups,
+    const std::vector<absl::btree_set<int64_t>>& edge_groups,
     const std::vector<NodeStrategyIdx>& s_hint, const bool compute_iis,
     const int64_t solver_timeout_in_seconds, const AutoShardingOption& option,
     std::optional<double> max_cost, absl::string_view request_name,
@@ -1966,13 +1973,22 @@ AutoShardingSolverResult CallSolver(
   request.mutable_s_hint()->Add(s_hint.begin(), s_hint.end());
   request.mutable_solver_timeout()->set_solver_timeout_in_seconds(
       solver_timeout_in_seconds);
-  request.mutable_overbudget_coeff()->set_coeff(kOverbudgetCoeff);
+  // Only apply soft memory constraints if the overbudget coeff is nonnegative.
+  if (option.memory_overbudget_coeff >= 0.0) {
+    request.mutable_overbudget_coeff()->set_coeff(
+        option.memory_overbudget_coeff);
+  }
   request.set_crash_at_infinity_costs_check(!option.try_multiple_mesh_shapes);
   request.set_compute_iis(compute_iis);
   request.set_saltiplier(kSaltiplier);
   request.set_deterministic_mode(deterministic_mode);
   request.set_request_name(std::string(request_name));
   request.set_enable_memory_edge_costs(option.model_resharding_memory_costs);
+  // If we're removing user shardings, we are probably doing internal testing /
+  // debugging where additional output from the solver might be helpful.
+  request.set_enable_output(
+      option.preserve_shardings ==
+      AutoShardingOption::PreserveShardingsType::kRemoveAllShardings);
   if (max_cost) {
     request.mutable_max_cost()->set_coeff(*max_cost);
   }
@@ -2128,55 +2144,27 @@ AutoShardingSolverResult CallSolver(
     }
   }
 
-  // Serialize intervals
-  std::vector<absl::flat_hash_set<EdgeIdx>> node_to_edges(
-      strategy_groups.size());
-  EdgeIdx edge_idx = 0;
-  for (const auto& [edge, _] : cost_graph.edge_costs_) {
-    node_to_edges[edge.second].insert(edge_idx);
-    ++edge_idx;
+  for (const auto& interval : node_intervals) {
+    AutoShardingSolverRequest_Pair pair;
+    pair.set_first(interval.first);
+    pair.set_second(interval.second);
+    *request.add_node_intervals() = std::move(pair);
   }
-  const absl::flat_hash_map<const HloValue*, HloLiveRange::TimeBound>&
-      buffer_live_ranges = hlo_live_range.buffer_live_ranges();
-  absl::flat_hash_map<NodeIdx, HloLiveRange::TimeBound> node_to_time_bound;
-  absl::flat_hash_map<EdgeIdx, HloLiveRange::TimeBound> edge_to_time_bound;
-  for (const auto& [value, time_bound] : buffer_live_ranges) {
-    const HloInstruction* instruction = value->instruction();
-    const ShapeIndex& index = value->index();
-    if (instruction->shape().IsTuple() && index.empty()) continue;
-    const spmd::StrategyGroup* strategy_group =
-        strategy_map.at(instruction).get();
-    const spmd::NodeIdx node_idx =
-        strategy_group->GetSubStrategyGroup(index)->node_idx;
-    if (node_idx < 0) continue;
-    node_to_time_bound[node_idx] = time_bound;
-    for (const EdgeIdx edge_idx : node_to_edges[node_idx]) {
-      edge_to_time_bound[edge_idx] = time_bound;
-    }
+  for (const auto& interval : edge_intervals) {
+    AutoShardingSolverRequest_Pair pair;
+    pair.set_first(interval.first);
+    pair.set_second(interval.second);
+    *request.add_edge_intervals() = std::move(pair);
   }
-  for (NodeIdx node_idx = 0; node_idx < request.num_nodes(); ++node_idx) {
-    AutoShardingSolverRequest_Pair interval;
-    if (auto time_bound = node_to_time_bound.find(node_idx);
-        time_bound != node_to_time_bound.end()) {
-      interval.set_first(time_bound->second.start);
-      interval.set_second(time_bound->second.end);
-    } else {
-      interval.set_first(std::numeric_limits<int64_t>::max());
-      interval.set_second(0);
-    }
-    *request.add_node_intervals() = std::move(interval);
+  for (const auto& reduced_group : node_groups) {
+    AutoShardingSolverRequest_Group group;
+    group.mutable_prims()->Add(reduced_group.begin(), reduced_group.end());
+    *request.add_node_groups() = std::move(group);
   }
-  for (EdgeIdx edge_idx = 0; edge_idx < request.edges_size(); ++edge_idx) {
-    AutoShardingSolverRequest_Pair interval;
-    if (auto time_bound = edge_to_time_bound.find(edge_idx);
-        time_bound != edge_to_time_bound.end()) {
-      interval.set_first(time_bound->second.start);
-      interval.set_second(time_bound->second.end);
-    } else {
-      interval.set_first(std::numeric_limits<int64_t>::max());
-      interval.set_second(0);
-    }
-    *request.add_edge_intervals() = std::move(interval);
+  for (const auto& reduced_group : edge_groups) {
+    AutoShardingSolverRequest_Group group;
+    group.mutable_prims()->Add(reduced_group.begin(), reduced_group.end());
+    *request.add_edge_groups() = std::move(group);
   }
 
   PopulateTemporalValues(cost_graph, request);
@@ -2198,7 +2186,7 @@ void CheckHloSharding(
         ins->opcode() != HloOpcode::kGetTupleElement) {
       // TODO(yuemmawang) Check other cases when it's helpful (it's not
       // needed so far).
-      double size = GetInstructionSize(ins->shape()) / 1024 / 1024 / 1024;
+      double size = ByteSizeOfShape(ins->shape()) / 1024 / 1024 / 1024;
       if ((!ShardingIsComplete(ins->sharding(), total_num_devices) ||
            ins->sharding().IsReplicated()) &&
           size > 1) {
@@ -2236,7 +2224,7 @@ void CheckHloSharding(
             // of resharding overheads, and some inconsistent shardings are
             // unavoidable.
             size_t op_size =
-                GetInstructionSize(op->shape()) / (1024.0 * 1024 * 1024);
+                ByteSizeOfShape(op->shape()) / (1024.0 * 1024 * 1024);
             std::string str = absl::StrCat("Shardings not consistent (op size ",
                                            op_size, " GB):", ins->ToString(),
                                            "\n Operand: ", op->ToString());
@@ -2342,7 +2330,7 @@ void SetHloSharding(
   }
 }
 
-Status SetHloShardingPostProcessing(
+absl::Status SetHloShardingPostProcessing(
     const HloInstructionSequence& sequence,
     const absl::flat_hash_set<const HloInstruction*>& instructions_to_shard,
     const StrategyMap& strategy_map, const CostGraph& cost_graph,
@@ -2923,8 +2911,8 @@ int64_t MemoryBudgetLowerBound(
 
       const Shape& shape =
           ShapeUtil::GetSubshape(value->instruction()->shape(), value->index());
-      int64_t value_memory_usage =
-          GetShardedInstructionSize(shape, num_devices, optional_sharding);
+      int64_t value_memory_usage = ByteSizeOfShapeIfShardedAcrossDevices(
+          shape, num_devices, optional_sharding);
       value_to_memory_size_mapping[value] = value_memory_usage;
       memory_usage += value_memory_usage;
     }
@@ -3302,7 +3290,7 @@ absl::Status GenerateReduceScatter(
             .output_sharding);
     TF_RETURN_IF_ERROR(inst->ReplaceAllUsesWith(replace_with));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 void AnnotateShardingWithSimpleHeuristic(
@@ -3422,11 +3410,11 @@ void AnnotateShardingWithSimpleHeuristic(
 
 // Filter strategies according to the option.force_batch_dim_to_mesh_dim.
 // This can be used to forcibly generate data-parallel strategies.
-Status FilterStrategy(const HloInstruction* ins, const Shape& shape,
-                      std::unique_ptr<StrategyGroup>& strategy_group,
-                      const ClusterEnvironment& cluster_env,
-                      const InstructionBatchDimMap& batch_map,
-                      const AutoShardingOption& option) {
+absl::Status FilterStrategy(const HloInstruction* ins, const Shape& shape,
+                            std::unique_ptr<StrategyGroup>& strategy_group,
+                            const ClusterEnvironment& cluster_env,
+                            const InstructionBatchDimMap& batch_map,
+                            const AutoShardingOption& option) {
   int mesh_dim = option.force_batch_dim_to_mesh_dim;
   int batch_dim = batch_map.at(GetBatchDimMapKey(ins));
   const Array<int64_t>& device_mesh = cluster_env.device_mesh_;
@@ -3460,7 +3448,7 @@ Status FilterStrategy(const HloInstruction* ins, const Shape& shape,
       << ins->ToString() << " does not have any valid strategies";
   strategy_group->strategies = std::move(new_strategies);
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Return the output sharding of the reduce-scatter variant of a given strategy.
@@ -3753,10 +3741,11 @@ AutoShardingImplementation::SaveAndRemoveShardingAnnotation(
   return std::make_pair(preserve_shardings, module_is_changed);
 }
 
-Status AutoShardingImplementation::CanonicalizeLayouts(HloModule* module) {
+absl::Status AutoShardingImplementation::CanonicalizeLayouts(
+    HloModule* module) {
   if (!module->layout_canonicalization_callback()) {
     LOG(INFO) << "There is no registered layout_canonicalization_callback.";
-    return OkStatus();
+    return absl::OkStatus();
   }
   TF_ASSIGN_OR_RETURN(auto layouts,
                       module->layout_canonicalization_callback()(*module));
@@ -3775,7 +3764,7 @@ Status AutoShardingImplementation::CanonicalizeLayouts(HloModule* module) {
   }
   *module->mutable_config().mutable_entry_computation_layout() =
       entry_computation_layout;
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Computes the set of instructions that lie outside any manually partitioned
@@ -3855,6 +3844,30 @@ AutoShardingImplementation::AutoShardingImplementation(
     const AutoShardingOption& option)
     : option_(option) {}
 
+std::pair<int64_t, int64_t> ReduceMemoryTerms(
+    int64_t num_primitives,
+    const std::vector<std::pair<spmd::LivenessIdx, spmd::LivenessIdx>>&
+        intervals,
+    std::vector<std::pair<spmd::LivenessIdx, spmd::LivenessIdx>>&
+        reduced_intervals,
+    std::vector<absl::btree_set<int64_t>>& reduced_groups) {
+  int64_t num_lives = 0;
+  for (const auto& interval : intervals) {
+    if (interval.first > interval.second) continue;  // Interval undefined
+    num_lives = std::max(num_lives, interval.second + 1);
+  }
+  auto Intervals =
+      [intervals](int64_t prim_idx) -> std::pair<int64_t, int64_t> {
+    return intervals.at(prim_idx);
+  };
+  spmd::MemoryTermReducer reducer;
+  auto num_terms =
+      reducer.Reduce(num_lives, num_primitives, std::move(Intervals));
+  reduced_intervals = reducer.GetReducedIntervals();
+  reduced_groups = reducer.GetReducedGroups();
+  return num_terms;
+}
+
 absl::StatusOr<AutoShardingResult> AutoShardingImplementation::RunAutoSharding(
     HloModule* module,
     const absl::flat_hash_set<std::string>& replicated_small_tensors,
@@ -3890,7 +3903,7 @@ absl::StatusOr<AutoShardingResult> AutoShardingImplementation::RunAutoSharding(
 
   // ----- Get a sequential schedule and do liveness analysis -----
   auto size_fn = [](const BufferValue& buffer) {
-    return spmd::GetBytes(buffer.shape());
+    return spmd::ByteSizeOfShape(buffer.shape());
   };
   TF_ASSIGN_OR_RETURN(
       HloSchedule schedule,
@@ -3968,7 +3981,9 @@ absl::StatusOr<AutoShardingResult> AutoShardingImplementation::RunAutoSharding(
   std::unique_ptr<CallGraph> call_graph = CallGraph::Build(module);
 
   HloCostAnalysis::Options hlo_cost_analysis_options{
-      .shape_size = [](const Shape& shape) { return spmd::GetBytes(shape); }};
+      .shape_size = [](const Shape& shape) {
+        return spmd::ByteSizeOfShape(shape);
+      }};
   HloCostAnalysis hlo_cost_analysis(hlo_cost_analysis_options);
   CHECK_OK(module->entry_computation()->Accept(&hlo_cost_analysis));
   for (size_t mesh_idx = 0; mesh_idx < partial_mesh_shapes.size(); ++mesh_idx) {
@@ -4030,7 +4045,11 @@ absl::StatusOr<AutoShardingResult> AutoShardingImplementation::RunAutoSharding(
           << " = " << memory_lower_bound_gb * option_.memory_budget_ratio
           << " GB";
       option_.memory_budget_per_device =
-          memory_lower_bound * option_.memory_budget_ratio;
+          memory_lower_bound * std::abs(option_.memory_budget_ratio);
+      // TODO(b/341299984): Document this flag syntax, or automate the behavior.
+      if (option_.memory_budget_ratio < 0) {
+        option_.memory_overbudget_coeff = -1.0;  // Disables the soft constraint
+      }
     } else if (option_.memory_budget_per_device > 0) {
       option_.memory_budget_per_device = original_memory_budget *
                                          original_device_mesh.num_elements() /
@@ -4068,7 +4087,7 @@ absl::StatusOr<AutoShardingResult> AutoShardingImplementation::RunAutoSharding(
                              option_.try_multiple_mesh_shapes));
     spmd::AliasSet alias_set =
         spmd::BuildAliasSet(module, input_output_alias_config, strategy_map);
-    if (Status alias_set_status = CheckAliasSetCompatibility(
+    if (absl::Status alias_set_status = CheckAliasSetCompatibility(
             alias_set, strategy_groups, sequence,
             /* crash_at_error */ !option_.try_multiple_mesh_shapes);
         !alias_set_status.ok()) {
@@ -4080,12 +4099,90 @@ absl::StatusOr<AutoShardingResult> AutoShardingImplementation::RunAutoSharding(
     spmd::CostGraph cost_graph(strategy_groups, associative_dot_pairs);
     cost_graph.Simplify(option_.simplify_graph);
 
+    // ----- Build & reduce node and edge intervals -----
+    std::vector<absl::flat_hash_set<spmd::EdgeIdx>> node_to_edges(
+        strategy_groups.size());
+    spmd::EdgeIdx edge_idx = 0;
+    for (const auto& [edge, _] : cost_graph.edge_costs_) {
+      node_to_edges[edge.second].insert(edge_idx);
+      ++edge_idx;
+    }
+    const absl::flat_hash_map<const HloValue*, HloLiveRange::TimeBound>&
+        buffer_live_ranges = hlo_live_range->buffer_live_ranges();
+    absl::flat_hash_map<spmd::NodeIdx, HloLiveRange::TimeBound>
+        node_to_time_bound;
+    absl::flat_hash_map<spmd::EdgeIdx, HloLiveRange::TimeBound>
+        edge_to_time_bound;
+    for (const auto& [value, time_bound] : buffer_live_ranges) {
+      const HloInstruction* instruction = value->instruction();
+      const ShapeIndex& index = value->index();
+      if (instruction->shape().IsTuple() && index.empty()) continue;
+      const spmd::StrategyGroup* strategy_group =
+          strategy_map.at(instruction).get();
+      const spmd::NodeIdx node_idx =
+          strategy_group->GetSubStrategyGroup(index)->node_idx;
+      if (node_idx < 0) continue;
+      node_to_time_bound[node_idx] = time_bound;
+      for (const spmd::EdgeIdx edge_idx : node_to_edges[node_idx]) {
+        edge_to_time_bound[edge_idx] = time_bound;
+      }
+    }
+    std::vector<std::pair<spmd::LivenessIdx, spmd::LivenessIdx>> node_intervals,
+        edge_intervals;
+    for (spmd::NodeIdx node_idx = 0; node_idx < strategy_groups.size();
+         ++node_idx) {
+      std::pair<spmd::LivenessIdx, spmd::LivenessIdx> interval;
+      if (auto time_bound = node_to_time_bound.find(node_idx);
+          time_bound != node_to_time_bound.end()) {
+        interval.first = time_bound->second.start;
+        interval.second = time_bound->second.end;
+      } else {
+        interval.first = std::numeric_limits<int64_t>::max();
+        interval.second = 0;
+      }
+      node_intervals.push_back(std::move(interval));
+    }
+    for (spmd::EdgeIdx edge_idx = 0; edge_idx < cost_graph.edge_costs_.size();
+         ++edge_idx) {
+      std::pair<spmd::LivenessIdx, spmd::LivenessIdx> interval;
+      if (auto time_bound = edge_to_time_bound.find(edge_idx);
+          time_bound != edge_to_time_bound.end()) {
+        interval.first = time_bound->second.start;
+        interval.second = time_bound->second.end;
+      } else {
+        interval.first = std::numeric_limits<int64_t>::max();
+        interval.second = 0;
+      }
+      edge_intervals.push_back(std::move(interval));
+    }
+    const absl::Time term_reduction_start_time = absl::Now();
+    std::vector<std::pair<spmd::LivenessIdx, spmd::LivenessIdx>>
+        reduced_node_intervals, reduced_edge_intervals;
+    std::vector<absl::btree_set<int64_t>> reduced_node_groups,
+        reduced_edge_groups;
+    auto num_node_terms =
+        ReduceMemoryTerms(strategy_groups.size(), node_intervals,
+                          reduced_node_intervals, reduced_node_groups);
+    auto num_edge_terms =
+        ReduceMemoryTerms(cost_graph.edge_costs_.size(), edge_intervals,
+                          reduced_edge_intervals, reduced_edge_groups);
+    const absl::Time term_reduction_end_time = absl::Now();
+    const auto term_reduction_duration =
+        term_reduction_end_time - term_reduction_start_time;
+    LOG(INFO) << "Memory Term Reducer took "
+              << absl::ToInt64Milliseconds(term_reduction_duration)
+              << " ms and reduced the number of terms from "
+              << num_node_terms.first + num_edge_terms.first << " to "
+              << num_node_terms.second + num_edge_terms.second;
+
     // ----- Call the ILP Solver -----
     spmd::AutoShardingSolverOutput output;
     std::string request_name = absl::StrCat("mesh_idx_", mesh_idx);
-    auto solver_result = Solve(*module, *hlo_live_range, strategy_map,
-                               strategy_groups, cost_graph, alias_set, option_,
-                               request_name, sharding_propagation_solution);
+    auto solver_result =
+        Solve(*module, *hlo_live_range, strategy_map, strategy_groups,
+              cost_graph, alias_set, reduced_node_intervals,
+              reduced_edge_intervals, reduced_node_groups, reduced_edge_groups,
+              option_, request_name, sharding_propagation_solution);
     if (solver_result.skip_auto_sharding) {
       return AutoShardingResult::kModuleUnchangedNoShardingPerformed;
     } else if (!solver_result.status.ok()) {
@@ -4113,7 +4210,7 @@ absl::StatusOr<AutoShardingResult> AutoShardingImplementation::RunAutoSharding(
     // ----- Set Sharding -----
     SetHloSharding(sequence, instructions_to_shard, strategy_map, cost_graph,
                    output.s_val, (mesh_idx == partial_mesh_shapes.size() - 1));
-    if (mesh_idx == partial_mesh_shapes.size() - 1) {
+    if (option_.post_process && mesh_idx == partial_mesh_shapes.size() - 1) {
       if (!SetHloShardingPostProcessing(
                sequence, instructions_to_shard, strategy_map, cost_graph,
                output.s_val, cluster_env,
@@ -4181,10 +4278,21 @@ bool ModuleHasUserShardings(const HloModule* module) {
   return has_shardings;
 }
 
+bool ModuleIsManuallyPartitioned(const HloModule* module) {
+  for (const HloComputation* computation : module->computations()) {
+    for (const HloInstruction* instruction : computation->instructions()) {
+      if (spmd::IsSPMDFullToShardShapeCustomCall(instruction) ||
+          spmd::IsSPMDShardToFullShapeCustomCall(instruction)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool IsSmallTensor(const HloInstruction* ins,
                    const AutoShardingOption& option) {
-  return spmd::GetInstructionSize(ins->shape()) <=
-         option.small_tensor_byte_size;
+  return spmd::ByteSizeOfShape(ins->shape()) <= option.small_tensor_byte_size;
 }
 
 bool ShardedOnTooManyMeshAxes(const HloModule& module) {
@@ -4281,8 +4389,22 @@ absl::StatusOr<bool> AutoSharding::Run(
     }
   }
 
+  // Run HloConstantSplitter for modules with manually partitioned sub-graphs to
+  // avoid having constant ops that are used as part of such manually
+  // partitioned sub-graphs, as well as outside those, leading to conflicts
+  // during sharding. However, constant splitting can cause increased
+  // auto-sharding times, and hence we enable this only when needed.
+  bool module_is_manually_partitioned = ModuleIsManuallyPartitioned(module);
+  if (module_is_manually_partitioned) {
+    HloConstantSplitter constant_splitter(
+        /*split_expressions=*/option_.enable_expression_constant_splitter,
+        /*extra_constraints=*/spmd::OpEncountersShardToFull);
+    CHECK_OK(constant_splitter.Run(module, execution_threads));
+    CHECK_OK(HloDCE().Run(module, execution_threads));
+  }
+
   std::vector<std::vector<int64_t>> mesh_shapes;
-  if (option_.try_multiple_mesh_shapes) {
+  if (option_.try_multiple_mesh_shapes || module_is_manually_partitioned) {
     bool asymmetrical_mesh_dims = false;
     for (size_t i = 0; i < option_.device_mesh_shape.size(); ++i) {
       if (option_.device_mesh_beta[0] != option_.device_mesh_beta[i] ||
@@ -4301,6 +4423,11 @@ absl::StatusOr<bool> AutoSharding::Run(
   } else {
     mesh_shapes.push_back(option_.device_mesh_shape);
   }
+
+  CHECK(option_.try_multiple_mesh_shapes || mesh_shapes.size() == 1)
+      << "Auto-sharding cannot infer a single appropriate mesh shape for this "
+         "HLO, and AutoShardingption::try_multiple_mesh_shapes is set to "
+         "false. Please re-run with the option set to true.";
 
   if (module->entry_computation()->num_parameters() > 0) {
     HloInstruction* parameter_instruction =
@@ -4405,8 +4532,7 @@ absl::StatusOr<bool> AutoSharding::Run(
 
   absl::StatusOr<bool> module_is_changed;
   if (skip_auto_sharding) {
-    LOG(FATAL) << "The auto-sharding solver has timed out without a solution.";
-    module_is_changed = false;
+    module_is_changed = false;  // The auto-sharding solver timed out.
   } else {
     std::string trying_to_find;
     if (option_.try_multiple_mesh_shapes) {
@@ -4486,6 +4612,10 @@ absl::StatusOr<bool> AutoSharding::Run(
 
   XLA_VLOG_LINES(6, absl::StrCat("After auto sharding:\n", module->ToString()));
   DumpHloModuleIfEnabled(*module, "after_auto_spmd_sharding");
+
+  if (skip_auto_sharding) {
+    LOG(FATAL) << "The auto-sharding solver has timed out without a solution.";
+  }
 
   return module_is_changed;
 }

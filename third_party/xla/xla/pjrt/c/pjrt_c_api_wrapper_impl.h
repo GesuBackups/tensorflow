@@ -30,6 +30,7 @@ limitations under the License.
 #include "absl/synchronization/mutex.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_helpers.h"
+#include "xla/pjrt/c/pjrt_c_api_layouts_extension.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_compiler.h"
@@ -38,8 +39,6 @@ limitations under the License.
 #include "xla/pjrt/pjrt_future.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/shape.h"
-#include "xla/status.h"
-#include "tsl/platform/casts.h"
 
 struct PJRT_Error {
   absl::Status status;
@@ -109,6 +108,10 @@ struct PJRT_Memory {
   xla::PjRtMemorySpace* memory_space;
   std::vector<PJRT_Device*> devices;
   PJRT_Client* client;
+};
+
+struct PJRT_ExecuteContext {
+  std::shared_ptr<xla::ExecuteContext> execute_context;
 };
 
 struct PJRT_Executable {
@@ -198,6 +201,14 @@ struct PJRT_TransferMetadata {
 
 struct PJRT_CopyToDeviceStream {
   std::unique_ptr<xla::CopyToDeviceStream> stream;
+};
+
+struct PJRT_Layouts_MemoryLayout {
+  std::unique_ptr<xla::PjRtLayout> layout;
+};
+
+struct PJRT_Layouts_SerializedLayout {
+  std::string serialized;
 };
 
 namespace pjrt {
@@ -360,6 +371,15 @@ PJRT_Error* PJRT_TopologyDescription_Attributes(
 
 PJRT_Error* PJRT_Compile(PJRT_Compile_Args* args);
 
+PJRT_Error* PJRT_Layouts_MemoryLayout_Destroy(
+    PJRT_Layouts_MemoryLayout_Destroy_Args* args);
+PJRT_Error* PJRT_Layouts_MemoryLayout_Serialize(
+    PJRT_Layouts_MemoryLayout_Serialize_Args* args);
+PJRT_Error* PJRT_Layouts_PJRT_Client_GetDefaultLayout(
+    PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args* args);
+PJRT_Error* PJRT_Layouts_PJRT_Buffer_MemoryLayout(
+    PJRT_Layouts_PJRT_Buffer_MemoryLayout_Args* args);
+
 // Helper macros and functions
 
 #define PJRT_RETURN_IF_ERROR(expr)                                \
@@ -391,6 +411,13 @@ PJRT_Error* PJRT_Compile(PJRT_Compile_Args* args);
 // Returns a specific error message when the program format is unknown.
 // Does not check the program format itself.
 std::string ProgramFormatErrorMsg(absl::string_view program_format);
+
+// Creates a C PJRT execute context from a C++ PJRT execute context.
+//
+// The returned execute context is owned by the caller and should be destroyed
+// with PJRT_ExecuteContext_Destroy.
+PJRT_ExecuteContext* CreateWrapperExecuteContext(
+    std::unique_ptr<xla::ExecuteContext> cpp_execute_context);
 
 // Creates a C PJRT topology from a C++ PJRT topology.
 //
@@ -424,9 +451,13 @@ std::shared_ptr<xla::KeyValueStoreInterface> ToCppKeyValueStore(
 // specific initialization.
 PJRT_Error* PJRT_Plugin_Initialize_NoOp(PJRT_Plugin_Initialize_Args* args);
 
+PJRT_Layouts_Extension CreateLayoutsExtension(
+    PJRT_Extension_Base* next = nullptr);
+
 // Creates a PJRT_Api with create_fn from the input and other functions in
 // pjrt_c_api_wrapper_impl.
 PJRT_Api CreatePjrtApi(PJRT_Client_Create* create_fn,
+                       PJRT_ExecuteContext_Create* execute_context_create_fn,
                        PJRT_TopologyDescription_Create* topology_create_fn,
                        PJRT_Plugin_Initialize* plugin_initialize_fn,
                        PJRT_Extension_Base* extension_start = nullptr,

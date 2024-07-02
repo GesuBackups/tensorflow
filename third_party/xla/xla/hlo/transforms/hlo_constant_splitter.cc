@@ -44,9 +44,19 @@ bool IsSupportedConstant(const HloInstruction* instruction,
 // Return if this is one of the constant expressions that we consider for
 // duplication.
 bool IsSupportedConstantExpression(const HloInstruction* instruction) {
-  return !instruction->HasSideEffect() &&
-         (instruction->opcode() == HloOpcode::kBroadcast ||
-          instruction->IsElementwise());
+  if (instruction->HasSideEffect()) {
+    return false;
+  }
+  if (instruction->IsElementwise()) {
+    return true;
+  }
+  switch (instruction->opcode()) {
+    case HloOpcode::kBroadcast:
+    case HloOpcode::kSlice:
+      return true;
+    default:
+      return false;
+  }
 }
 
 // Perform duplication of a certain constant expression and replace the
@@ -115,7 +125,8 @@ absl::StatusOr<bool> HloConstantSplitter::Run(
     for (HloInstruction* instruction :
          computation->MakeInstructionPostOrder()) {
       VLOG(10) << "Considering: " << instruction->ToString();
-      if (IsSupportedConstant(instruction, split_expressions_)) {
+      if (IsSupportedConstant(instruction, split_expressions_) &&
+          extra_constraints_(instruction)) {
         VLOG(10) << "Adding to constant list: " << instruction->ToString();
         constants_set.insert(instruction);
         constants_list.push_back(instruction);

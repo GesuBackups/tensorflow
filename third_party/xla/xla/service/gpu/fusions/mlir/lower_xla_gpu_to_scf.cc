@@ -26,6 +26,7 @@ limitations under the License.
 #include "mlir/Dialect/Tensor/IR/Tensor.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/ImplicitLocOpBuilder.h"  // from @llvm-project
 #include "mlir/IR/Location.h"  // from @llvm-project
@@ -124,16 +125,21 @@ struct RewriteShuffleReduce : mlir::OpRewritePattern<ShuffleReduceOp> {
         auto padded_int_ty = b.getIntegerType(n_shuffles * 32);
         value = b.create<mlir::arith::BitcastOp>(int_ty, value);
         value = b.create<mlir::arith::ExtUIOp>(padded_int_ty, value);
-        auto vector_type = ml::getVectorType(b.getI32Type(), n_shuffles);
-        value = b.create<ml::BitcastOp>(vector_type, value);
-        mlir::Value result_vec = b.create<ml::UndefOp>(vector_type);
-        for (int i = 0; i < n_shuffles; ++i) {
-          auto idx = b.create<mlir::arith::ConstantIntOp>(i, 32);
-          result_vec = b.create<ml::InsertElementOp>(
-              result_vec,
-              shuffle_32(b.create<ml::ExtractElementOp>(value, idx)), idx);
+        if (n_shuffles > 1) {
+          // Don't generate vectors if the size is 1.
+          auto vector_type = ml::getVectorType(b.getI32Type(), n_shuffles);
+          value = b.create<ml::BitcastOp>(vector_type, value);
+          mlir::Value result_vec = b.create<ml::UndefOp>(vector_type);
+          for (int i = 0; i < n_shuffles; ++i) {
+            auto idx = b.create<mlir::arith::ConstantIntOp>(i, 32);
+            result_vec = b.create<ml::InsertElementOp>(
+                result_vec,
+                shuffle_32(b.create<ml::ExtractElementOp>(value, idx)), idx);
+          }
+          value = b.create<ml::BitcastOp>(padded_int_ty, result_vec);
+        } else {
+          value = shuffle_32(value);
         }
-        value = b.create<ml::BitcastOp>(padded_int_ty, result_vec);
         value = b.create<mlir::arith::TruncIOp>(int_ty, value);
         value = b.create<ml::BitcastOp>(ty, value);
         return value;
@@ -146,6 +152,18 @@ struct RewriteShuffleReduce : mlir::OpRewritePattern<ShuffleReduceOp> {
               shuffle_int_or_float(b.create<mlir::complex::ReOp>(value)),
               shuffle_int_or_float(b.create<mlir::complex::ImOp>(value)));
         }
+        if (value.getType().isUnsignedInteger()) {
+          auto ty = value.getType();
+          auto signless_ty = b.getIntegerType(ty.getIntOrFloatBitWidth());
+          value = b.create<mlir::UnrealizedConversionCastOp>(
+                       mlir::TypeRange{signless_ty}, value)
+                      .getResult(0);
+          value = shuffle_int_or_float(value);
+          value = b.create<mlir::UnrealizedConversionCastOp>(
+                       mlir::TypeRange{ty}, value)
+                      .getResult(0);
+          return value;
+        }
         return shuffle_int_or_float(value);
       };
 
@@ -153,8 +171,8 @@ struct RewriteShuffleReduce : mlir::OpRewritePattern<ShuffleReduceOp> {
       for (auto value : values) {
         args.push_back(shuffle(value));
       }
-      values = b.create<mlir::func::CallOp>(op.getReducerAttr().getAttr(),
-                                            op.getResultTypes(), args)
+      values = b.create<PureCallOp>(op.getResultTypes(),
+                                    op.getReducerAttr().getAttr(), args)
                    .getResults();
     }
     rewriter.replaceOp(op, values);

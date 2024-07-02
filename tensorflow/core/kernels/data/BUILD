@@ -297,6 +297,7 @@ tf_kernel_library(
         "//tensorflow/core/data:serialization_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@local_tsl//tsl/platform:logging",
         "@local_tsl//tsl/platform:thread_annotations",
     ],
@@ -849,7 +850,9 @@ tf_kernel_library(
         "//tensorflow/core/data:stats_utils",
         "//tensorflow/core/profiler/lib:traceme",
         "//tensorflow/core/profiler/lib:traceme_encode",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
     ],
 )
 
@@ -858,6 +861,7 @@ tf_cc_test(
     size = "small",
     srcs = ["parallel_map_dataset_op_test.cc"],
     deps = [
+        ":batch_dataset_op",
         ":iterator_ops",
         ":parallel_map_dataset_op",
         ":range_dataset_op",
@@ -874,6 +878,7 @@ tf_cc_test(
         "//tensorflow/core/data:stats_utils",
         "//tensorflow/core/kernels:cwise_op",
         "//tensorflow/core/kernels:function_ops",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -1450,6 +1455,7 @@ tf_kernel_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/data:name_utils",
         "//tensorflow/core/data:utils",
+        "@local_tsl//tsl/platform:logging",
     ],
 )
 

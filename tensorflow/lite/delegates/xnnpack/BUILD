@@ -1,3 +1,4 @@
+load("@flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load("//tensorflow/lite:build_def.bzl", "tflite_copts")
 load("//tensorflow/lite:special_rules.bzl", "internal_visibility_allowlist", "tflite_portable_test_suite_combined")
@@ -215,15 +216,6 @@ cc_library(
 )
 
 cc_library(
-    name = "xnnpack_delegate_test",
-    testonly = True,
-    hdrs = ["xnnpack_delegate_test.h"],
-    deps = [
-        ":xnnpack_delegate",
-    ],
-)
-
-cc_library(
     name = "xnnpack_delegate",
     srcs = ["xnnpack_delegate.cc"],
     hdrs = ["xnnpack_delegate.h"],
@@ -251,7 +243,9 @@ cc_library(
         ":tflite_with_xnnpack_qs8",
         ":tflite_with_xnnpack_qu8",
         ":tflite_with_xnnpack_transient_indirection_buffer",
+        ":weight_cache",
         "//tensorflow/lite:kernel_api",
+        "//tensorflow/lite:logger",
         "//tensorflow/lite:minimal_logging",
         "//tensorflow/lite/c:c_api_types",
         "//tensorflow/lite/core:subgraph",
@@ -289,6 +283,7 @@ cc_library(
     linkstatic = True,
     deps = [
         ":quantization_util",
+        ":weight_cache",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:minimal_logging",
         "//tensorflow/lite/c:c_api_types",
@@ -303,7 +298,7 @@ cc_library(
         "//tensorflow/lite/kernels/internal/utils:sparsity_format_converter",
         "//tensorflow/lite/schema:schema_fbs",
         "//tensorflow/lite/tools/optimize:reduced_precision_support",
-        "@XNNPACK//:XNNPACK_test_mode",
+        "@XNNPACK",
         "@XNNPACK//:experiments_config",
         "@XNNPACK//:logging",
     ],
@@ -320,6 +315,30 @@ cc_library(
         "//tensorflow/lite/kernels/internal:reference_base",
         "//tensorflow/lite/kernels/internal:types",
         "@FP16",
+    ],
+)
+
+flatbuffer_cc_library(
+    name = "weight_cache_schema",
+    srcs = ["weight_cache_schema.fbs"],
+    compatible_with = get_compatible_with_portable(),
+    flatc_args = [
+        "--gen-mutable",
+        "--gen-object-api",
+    ],
+)
+
+cc_library(
+    name = "weight_cache",
+    srcs = ["weight_cache.cc"],
+    hdrs = ["weight_cache.h"],
+    compatible_with = get_compatible_with_portable(),
+    deps = [
+        ":weight_cache_schema",
+        "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite/c:common",
+        "@XNNPACK",
+        "@flatbuffers//:runtime_cc",
     ],
 )
 
@@ -578,13 +597,16 @@ cc_library(
     srcs = ["odml_sdpa_tester.cc"],
     hdrs = ["odml_sdpa_tester.h"],
     deps = [
+        "//tensorflow/compiler/mlir/lite/schema:schema_conversion_utils",
+        "//tensorflow/compiler/mlir/lite/schema:schema_fbs",
         "//tensorflow/lite:framework",
-        "//tensorflow/lite:schema_fbs_version",
+        "//tensorflow/lite:version",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite/core:framework",
         "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/core/kernels:builtin_ops",
         "//tensorflow/lite/experimental/genai:genai_ops",
-        "//tensorflow/lite/schema:schema_conversion_utils",
+        "//tensorflow/lite/kernels:kernel_util",
         "//tensorflow/lite/schema:schema_fbs",
         "@com_google_googletest//:gtest",
         "@flatbuffers",
@@ -1605,6 +1627,11 @@ cc_test(
 cc_test(
     name = "odml_sdpa_test",
     srcs = ["odml_sdpa_test.cc"],
+    data = [
+        ":odml_sdpa_composite_gqa.tflite",
+        ":odml_sdpa_composite_mha.tflite",
+        ":odml_sdpa_composite_mqa.tflite",
+    ],
     linkopts = select({
         "//tensorflow:emscripten": EMSCRIPTEN_LINKOPTS,
         "//conditions:default": [],
@@ -2825,6 +2852,20 @@ cc_test(
         "//tensorflow/lite:mutable_op_resolver",
         "//tensorflow/lite/core:framework",
         "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "weight_cache_test",
+    srcs = ["weight_cache_test.cc"],
+    deps = [
+        ":test_main",
+        ":weight_cache",
+        ":weight_cache_schema",
+        "//tensorflow/lite/c:common",
+        "@XNNPACK",
+        "@com_google_googletest//:gtest",
+        "@flatbuffers//:runtime_cc",
     ],
 )
 

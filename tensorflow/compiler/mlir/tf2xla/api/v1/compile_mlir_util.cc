@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <memory>
 #include <string>
+#include <variant>
 
 #include "tensorflow/compiler/mlir/tf2xla/mlir_bridge_rollout_policy.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -96,7 +97,7 @@ constexpr absl::string_view kGroupKeyAttrName =
 // that is converted to a TensorShape.
 absl::StatusOr<TensorShape> GetTensorShapeFromXlaArgument(
     const XlaArgument& arg) {
-  if (absl::holds_alternative<xla::Shape>(arg.shape)) {
+  if (std::holds_alternative<xla::Shape>(arg.shape)) {
     TensorShape arg_shape;
     TF_RETURN_IF_ERROR(
         XLAShapeToTensorShape(std::get<xla::Shape>(arg.shape), &arg_shape));
@@ -1029,26 +1030,6 @@ Status BuildHloFromGraph(
                     flib_def, debug_info, &mlir_context));
   return BuildHloFromModule(module.get(), builder, xla_params, returns, args,
                             device_type, custom_legalization_passes);
-}
-
-Status CompileGraphToXlaHlo(
-    const Graph& graph, llvm::ArrayRef<XlaArgument> args,
-    llvm::ArrayRef<std::string> control_rets, llvm::StringRef device_type,
-    bool use_tuple_args, bool enable_op_fallback,
-    const FunctionLibraryDefinition& flib_def, const GraphDebugInfo& debug_info,
-    XlaShapeLayoutHelpers::ShapeDeterminationFns shape_determination_fns,
-    XlaCompilationResult* compilation_result,
-    llvm::MutableArrayRef<std::unique_ptr<mlir::Pass>>
-        custom_legalization_passes) {
-  mlir::MLIRContext context;
-  TF_ASSIGN_OR_RETURN(
-      mlir::OwningOpRef<mlir::ModuleOp> module,
-      GraphToModule(/*unconditionally_use_set_output_shapes=*/false, graph,
-                    control_rets, flib_def, debug_info, &context));
-  return CompileGraphToXlaHlo(
-      module.get(), args, device_type, use_tuple_args, enable_op_fallback,
-      /*use_return_tuple=*/true, shape_determination_fns, compilation_result,
-      custom_legalization_passes);
 }
 
 void RegisterConvertMlirToXlaHloPipelineWithDefaults() {

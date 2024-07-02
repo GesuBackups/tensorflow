@@ -22,6 +22,7 @@ limitations under the License.
 #include <limits>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "xla/client/lib/arithmetic.h"
 #include "xla/client/lib/constants.h"
 #include "xla/client/lib/loops.h"
@@ -93,7 +94,8 @@ static XlaOp DoWithUpcastToF32(XlaOp operand,
 
 // TODO(jlebar): Use this function in more places in this file to restrict the
 // domain of other functions.
-static Status EnsureOperandIsRealFp(absl::string_view op_name, XlaOp operand) {
+static absl::Status EnsureOperandIsRealFp(absl::string_view op_name,
+                                          XlaOp operand) {
   auto& b = *operand.builder();
   TF_ASSIGN_OR_RETURN(auto shape, b.GetShape(operand));
   auto elem_ty = shape.element_type();
@@ -102,7 +104,7 @@ static Status EnsureOperandIsRealFp(absl::string_view op_name, XlaOp operand) {
         "Operands to %s must be real-valued floating-point, but got %s",
         op_name, PrimitiveType_Name(elem_ty));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 XlaOp IsPosInf(XlaOp operand) {
@@ -1309,9 +1311,22 @@ XlaOp Atanh(XlaOp x) {
 // correct answer of 3.40281961e+38 (0x7f7fffec) is very close to max-float, so
 // we deem this acceptable.
 XlaOp Cosh(XlaOp x) {
-  return DoWithUpcastToF32(x, {BF16, F16}, [](XlaOp x) {
+  XlaBuilder* b = x.builder();
+  auto do_it = [&](XlaOp x) -> absl::StatusOr<XlaOp> {
+    TF_ASSIGN_OR_RETURN(auto shape, b->GetShape(x));
+
     auto log_one_half = Log(ScalarLike(x, 0.5));
-    return Exp(x + log_one_half) + Exp(-x + log_one_half);
+    auto result = Exp(x + log_one_half) + Exp(-x + log_one_half);
+    if (primitive_util::IsComplexType(shape.element_type())) {
+      return result;
+    }
+
+    // Cosh(x) has a minimum value of 1.0 near 0.0, clamp to 1.0 to handle
+    // rounding errors in Exp().
+    return Max(result, ScalarLike(result, 1.0));
+  };
+  return DoWithUpcastToF32(x, {BF16, F16}, [&](XlaOp x) {
+    return b->ReportErrorOrReturn(do_it(x));
   });
 }
 

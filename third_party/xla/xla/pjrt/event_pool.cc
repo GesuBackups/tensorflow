@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "absl/synchronization/mutex.h"
 #include "xla/status_macros.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 
@@ -46,8 +47,7 @@ absl::StatusOr<EventPool::Handle> EventPool::AllocateEvent(
     }
   }
   if (!event.event_) {
-    event.event_ = std::make_unique<se::Event>(executor);
-    TF_RET_CHECK(event.event_->Init()) << "Event initialization failed";
+    TF_ASSIGN_OR_RETURN(event.event_, executor->CreateEvent());
   }
   return event;
 }

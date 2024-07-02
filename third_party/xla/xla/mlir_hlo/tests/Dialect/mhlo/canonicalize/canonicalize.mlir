@@ -973,14 +973,6 @@ func.func @iota_broadcast_second() -> tensor<5x4xi32> {
   func.return %0 : tensor<5x4xi32>
 }
 
-// CHECK-LABEL: @unary_einsum
-func.func @unary_einsum(%arg0: tensor<2x3xf32>) -> tensor<2x2xf32> {
-  // CHECK: %[[ONE:.*]] = mhlo.constant dense<1.000000e+00> : tensor<f32>
-  // CHECK: "mhlo.einsum"(%[[ONE]], %arg0) <{einsum_config = ",ab->aa"}>
-  %0 = "mhlo.unary_einsum"(%arg0) {einsum_config = "ab->aa"} : (tensor<2x3xf32>) -> tensor<2x2xf32>
-  func.return %0 : tensor<2x2xf32>
-}
-
 // CHECK-LABEL: func @fold_copy
 // CHECK-SAME: [[ARG:%[a-zA-Z0-9]+]]
 func.func @fold_copy(%arg : tensor<1x4xf32>) -> tensor<1x4xf32> {
@@ -1427,27 +1419,6 @@ func.func @unpack_repack_same_tuple_single_element(%arg0: tuple<tensor<i32>>) ->
 
   // CHECK: return [[ARG0]]
   func.return %3 : tuple<tensor<i32>>
-}
-
-// CHECK-LABEL: func @erase_dead_lhlo_constant
-func.func @erase_dead_lhlo_constant() {
-  %M = memref.alloc() : memref<256x1024xf32>
-  // CHECK-NEXT: return
-  "lmhlo.constant"(%M) {value = dense<0.0> : tensor<f32>} : (memref<256x1024xf32>) -> ()
-  memref.dealloc %M : memref<256x1024xf32>
-  func.return
-}
-
-// A negative test for dead lhlo constant op erasure.
-// CHECK-LABEL: func @erase_dead_lhlo_constant_negative
-func.func @erase_dead_lhlo_constant_negative(%M : memref<4xf32>) -> memref<256x1024xf32> {
-  // CHECK-NEXT: lmhlo.constant
-  "lmhlo.constant"(%M) {value = dense<0.0> : tensor<f32>} : (memref<4xf32>) -> ()
-  // CHECK-NEXT: memref.alloc
-  // CHECK-NEXT: lmhlo.constant
-  %N = memref.alloc() : memref<256x1024xf32>
-  "lmhlo.constant"(%N) {value = dense<0.0> : tensor<f32>} : (memref<256x1024xf32>) -> ()
-  func.return %N : memref<256x1024xf32>
 }
 
 // CHECK-LABEL: func @fold_get_dimension_size

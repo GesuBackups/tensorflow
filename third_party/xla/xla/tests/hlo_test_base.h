@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_module_group.h"
@@ -32,7 +33,6 @@ limitations under the License.
 #include "xla/service/hlo_verifier.h"
 #include "xla/service/platform_util.h"
 #include "xla/shape_layout.h"
-#include "xla/statusor.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/tests/literal_test_util.h"
@@ -101,7 +101,7 @@ class HloTestBase : public ManifestCheckingTest {
 
   // Runs the hlo_pass with the provided module and returns the result. This
   // function also verifies that the module remains unchanged when hlo_pass
-  // returns false as the StatusOr value.
+  // returns false as the absl::StatusOr value.
   //
   // These three overloads all do the same thing.  The && overload lets you do
   // `RunHloPass(MyPass(), module)` all in one line.  The reason for the
@@ -121,7 +121,7 @@ class HloTestBase : public ManifestCheckingTest {
   // Runs the hlo_pass with the provided module group and returns the result.
   // This method runs the input HLO module group pass for a `HloModuleGroup` and
   // it also verifies the module group remains unchanged when hlo_pass returns
-  // false as the StatusOr value.
+  // false as the absl::StatusOr value.
   static absl::StatusOr<bool> RunHloPass(HloPassInterface&& hlo_pass,
                                          HloModuleGroup* module_group);
 

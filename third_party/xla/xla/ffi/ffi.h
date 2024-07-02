@@ -17,11 +17,13 @@ limitations under the License.
 #define XLA_FFI_FFI_H_
 
 #ifdef XLA_FFI_API_FFI_H_
-#error Two different XLA FFI implementations cannot be included together
+#error Two different XLA FFI implementations cannot be included together. \
+       See README.md for more details.
 #endif  // XLA_FFI_API_FFI_H_
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 
@@ -29,42 +31,37 @@ limitations under the License.
 #include "xla/ffi/api/api.h"
 // IWYU pragma: end_exports
 
+#include "absl/algorithm/container.h"
+#include "absl/base/attributes.h"
+#include "absl/base/nullability.h"
+#include "absl/base/optimization.h"
+#include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/c_api_internal.h"  // IWYU pragma: keep
+#include "xla/ffi/execution_context.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/primitive_util.h"
-#include "xla/runtime/memref_view.h"
-#include "xla/status.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/scratch_allocator.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/types.h"  // IWYU pragma: keep
 #include "xla/xla_data.pb.h"
+#include "tsl/platform/logging.h"
 
 namespace xla::ffi {
 
 // Type tags to bind parameters passed via execution context to FFI handler.
 struct Stream {};             // binds `se::Stream*`
+struct DeviceOrdinal {};      // binds `int32_t` with device ordinal
+struct Allocator {};          // binds `se::DeviceMemoryAllocator*`
 struct ScratchAllocator {};   // binds `se::OwningScratchAllocator`
 struct CalledComputation {};  // binds `HloComputation*`
 
 //===----------------------------------------------------------------------===//
 // Arguments
 //===----------------------------------------------------------------------===//
-
-struct BufferBase {
-  PrimitiveType dtype;
-  se::DeviceMemoryBase data;
-  absl::Span<const int64_t> dimensions;
-
-  // TODO(ezhulenev): Remove this implicit conversion once we'll migrate to FFI
-  // handlers from runtime custom calls.
-  operator runtime::MemrefView() {  // NOLINT
-    return runtime::MemrefView{dtype, data.opaque(), dimensions};
-  }
-};
 
 namespace internal {
 
@@ -75,10 +72,51 @@ using NativeType = typename primitive_util::PrimitiveTypeToNative<dtype>::type;
 
 }  // namespace internal
 
+// Dynamically-typed buffer.
+//
+// No checks are done at decoding time. Any dtype and rank combination is
+// accepted.
+class AnyBuffer {
+ public:
+  using Dimensions = absl::Span<const int64_t>;
+
+  explicit AnyBuffer(absl::Nonnull<const XLA_FFI_Buffer*> buf) : buf_(buf) {
+    DCHECK(buf_ != nullptr) << "XLA_FFI_Buffer must be non-null";
+  }
+
+  PrimitiveType element_type() const { return PrimitiveType(buf_->dtype); }
+
+  void* untyped_data() const { return buf_->data; }
+
+  Dimensions dimensions() const { return Dimensions(buf_->dims, buf_->rank); }
+
+  ABSL_ATTRIBUTE_ALWAYS_INLINE size_t size_bytes() const {
+    if (ABSL_PREDICT_TRUE(primitive_util::IsArrayType(element_type()))) {
+      return absl::c_accumulate(dimensions(),
+                                primitive_util::ByteWidth(element_type()),
+                                std::multiplies<int64_t>());
+    }
+    return 0;
+  }
+
+  se::DeviceMemoryBase device_memory() const {
+    return se::DeviceMemoryBase(untyped_data(), size_bytes());
+  }
+
+ private:
+  const XLA_FFI_Buffer* buf_;
+};
+
+// Buffer with a statically-known dtype and rank.
+//
+// The dtype and rank are checked at decoding time. If rank is not specified,
+// any rank is accepted.
 template <PrimitiveType dtype, size_t rank = internal::kDynamicRank>
 struct Buffer {
+  using Dimensions = AnyBuffer::Dimensions;
+
   se::DeviceMemory<internal::NativeType<dtype>> data;
-  absl::Span<const int64_t> dimensions;
+  Dimensions dimensions;
 };
 
 // clang-format off
@@ -89,38 +127,35 @@ template <PrimitiveType dtype> using BufferR3 = Buffer<dtype, 3>;
 template <PrimitiveType dtype> using BufferR4 = Buffer<dtype, 4>;
 // clang-format on
 
+using Token = BufferR0<PrimitiveType::TOKEN>;
+
 namespace internal {
 
-inline BufferBase DecodeBuffer(XLA_FFI_Buffer* buf) {
-  size_t size_bytes = primitive_util::ByteWidth(PrimitiveType(buf->dtype));
-  for (int64_t i = 0; i < buf->rank; ++i) size_bytes *= buf->dims[i];
-
-  BufferBase buffer;
-  buffer.dtype = PrimitiveType(buf->dtype);
-  buffer.data = se::DeviceMemoryBase(buf->data, size_bytes);
-  buffer.dimensions = absl::MakeConstSpan(buf->dims, buf->rank);
-  return buffer;
-}
-
 template <PrimitiveType dtype, size_t rank>
-std::optional<Buffer<dtype, rank>> DecodeBuffer(XLA_FFI_Buffer* buf,
-                                                DiagnosticEngine& diagnostic) {
+ABSL_ATTRIBUTE_ALWAYS_INLINE std::optional<Buffer<dtype, rank>> DecodeBuffer(
+    XLA_FFI_Buffer* buf, DiagnosticEngine& diagnostic) {
   if (auto buf_dtype = PrimitiveType(buf->dtype);
-      XLA_FFI_PREDICT_FALSE(buf_dtype != dtype)) {
+      ABSL_PREDICT_FALSE(buf_dtype != dtype)) {
     return diagnostic.Emit("Wrong buffer dtype: expected ")
            << primitive_util::LowercasePrimitiveTypeName(dtype) << " but got "
            << primitive_util::LowercasePrimitiveTypeName(buf_dtype);
   }
 
   if constexpr (rank != internal::kDynamicRank) {
-    if (XLA_FFI_PREDICT_FALSE(buf->rank != rank)) {
+    if (ABSL_PREDICT_FALSE(buf->rank != rank)) {
       return diagnostic.Emit("Wrong buffer rank: expected ")
              << rank << " but got " << buf->rank;
     }
   }
 
-  size_t size_bytes = primitive_util::ByteWidth(PrimitiveType(buf->dtype));
-  for (int64_t i = 0; i < buf->rank; ++i) size_bytes *= buf->dims[i];
+  size_t size_bytes = 0;
+  if constexpr (primitive_util::IsArrayType(dtype)) {
+    size_bytes = primitive_util::ByteWidth(dtype);
+    for (int64_t i = 0, r = rank == internal::kDynamicRank ? buf->rank : rank;
+         i < r; ++i) {
+      size_bytes *= buf->dims[i];
+    }
+  }
 
   Buffer<dtype, rank> buffer;
   buffer.data = se::DeviceMemory<NativeType<dtype>>(
@@ -136,8 +171,8 @@ std::optional<Buffer<dtype, rank>> DecodeBuffer(XLA_FFI_Buffer* buf,
 //===----------------------------------------------------------------------===//
 
 template <>
-struct ArgBinding<BufferBase> {
-  using Arg = BufferBase;
+struct ArgBinding<AnyBuffer> {
+  using Arg = AnyBuffer;
 };
 
 template <PrimitiveType dtype, size_t rank>
@@ -150,25 +185,25 @@ struct ArgBinding<Buffer<dtype, rank>> {
 //===----------------------------------------------------------------------===//
 
 template <>
-struct ArgDecoding<BufferBase> {
-  XLA_FFI_ATTRIBUTE_ALWAYS_INLINE
-  static std::optional<BufferBase> Decode(XLA_FFI_ArgType type, void* arg,
-                                          DiagnosticEngine& diagnostic) {
-    if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_ArgType_BUFFER)) {
+struct ArgDecoding<AnyBuffer> {
+  ABSL_ATTRIBUTE_ALWAYS_INLINE
+  static std::optional<AnyBuffer> Decode(XLA_FFI_ArgType type, void* arg,
+                                         DiagnosticEngine& diagnostic) {
+    if (ABSL_PREDICT_FALSE(type != XLA_FFI_ArgType_BUFFER)) {
       return diagnostic.Emit("Wrong argument type: expected ")
              << XLA_FFI_ArgType_BUFFER << " but got " << type;
     }
 
-    return internal::DecodeBuffer(reinterpret_cast<XLA_FFI_Buffer*>(arg));
+    return AnyBuffer(reinterpret_cast<XLA_FFI_Buffer*>(arg));
   }
 };
 
 template <PrimitiveType dtype, size_t rank>
 struct ArgDecoding<Buffer<dtype, rank>> {
-  XLA_FFI_ATTRIBUTE_ALWAYS_INLINE
+  ABSL_ATTRIBUTE_ALWAYS_INLINE
   static std::optional<Buffer<dtype, rank>> Decode(
       XLA_FFI_ArgType type, void* arg, DiagnosticEngine& diagnostic) {
-    if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_ArgType_BUFFER)) {
+    if (ABSL_PREDICT_FALSE(type != XLA_FFI_ArgType_BUFFER)) {
       return diagnostic.Emit("Wrong argument type: expected ")
              << XLA_FFI_ArgType_BUFFER << " but got " << type;
     }
@@ -183,24 +218,25 @@ struct ArgDecoding<Buffer<dtype, rank>> {
 //===----------------------------------------------------------------------===//
 
 template <>
-struct RetDecoding<BufferBase> {
-  XLA_FFI_ATTRIBUTE_ALWAYS_INLINE
-  static std::optional<Result<BufferBase>> Decode(
-      XLA_FFI_RetType type, void* arg, DiagnosticEngine& diagnostic) {
-    if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_RetType_BUFFER)) {
+struct RetDecoding<AnyBuffer> {
+  ABSL_ATTRIBUTE_ALWAYS_INLINE
+  static std::optional<Result<AnyBuffer>> Decode(XLA_FFI_RetType type,
+                                                 void* arg,
+                                                 DiagnosticEngine& diagnostic) {
+    if (ABSL_PREDICT_FALSE(type != XLA_FFI_RetType_BUFFER)) {
       return diagnostic.Emit("Wrong result type: expected ")
              << XLA_FFI_RetType_BUFFER << " but got " << type;
     }
-    return internal::DecodeBuffer(reinterpret_cast<XLA_FFI_Buffer*>(arg));
+    return AnyBuffer(reinterpret_cast<XLA_FFI_Buffer*>(arg));
   }
 };
 
 template <PrimitiveType dtype, size_t rank>
 struct RetDecoding<Buffer<dtype, rank>> {
-  XLA_FFI_ATTRIBUTE_ALWAYS_INLINE
+  ABSL_ATTRIBUTE_ALWAYS_INLINE
   static std::optional<Result<Buffer<dtype, rank>>> Decode(
       XLA_FFI_RetType type, void* arg, DiagnosticEngine& diagnostic) {
-    if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_RetType_BUFFER)) {
+    if (ABSL_PREDICT_FALSE(type != XLA_FFI_RetType_BUFFER)) {
       return diagnostic.Emit("Wrong result type: expected ")
              << XLA_FFI_RetType_BUFFER << " but got " << type;
     }
@@ -220,13 +256,13 @@ struct RetDecoding<Buffer<dtype, rank>> {
     using Type = absl::Span<const T>;                                    \
     static std::optional<Type> Decode(XLA_FFI_AttrType type, void* attr, \
                                       DiagnosticEngine& diagnostic) {    \
-      if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_AttrType_ARRAY)) {       \
+      if (ABSL_PREDICT_FALSE(type != XLA_FFI_AttrType_ARRAY)) {          \
         return diagnostic.Emit("Wrong attribute type: expected ")        \
                << XLA_FFI_AttrType_ARRAY << " but got " << type;         \
       }                                                                  \
                                                                          \
       auto* array = reinterpret_cast<XLA_FFI_Array*>(attr);              \
-      if (XLA_FFI_PREDICT_FALSE(array->dtype != TYPE)) {                 \
+      if (ABSL_PREDICT_FALSE(array->dtype != TYPE)) {                    \
         return diagnostic.Emit("Wrong array data type: expected ")       \
                << TYPE << " but got " << array->dtype;                   \
       }                                                                  \
@@ -256,8 +292,8 @@ struct AttrDecoding<Pointer<T>> {
   static std::optional<Type> Decode(XLA_FFI_AttrType type, void* attr,
                                     DiagnosticEngine& diagnostic) {
     auto* scalar = reinterpret_cast<XLA_FFI_Scalar*>(attr);
-    if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_AttrType_SCALAR ||
-                              scalar->dtype != XLA_FFI_DataType_S64)) {
+    if (ABSL_PREDICT_FALSE(type != XLA_FFI_AttrType_SCALAR ||
+                           scalar->dtype != XLA_FFI_DataType_S64)) {
       return diagnostic.Emit("Wrong attribute type: ")
              << "expected i64 scalar for passing pointer but got " << type;
     }
@@ -281,6 +317,30 @@ struct CtxDecoding<Stream> {
                                     DiagnosticEngine&) {
     void* ptr = api->internal_api->XLA_FFI_INTERNAL_Stream_Get(ctx);
     return reinterpret_cast<Type>(ptr);
+  }
+};
+
+template <>
+struct CtxDecoding<DeviceOrdinal> {
+  using Type = int32_t;
+
+  static std::optional<Type> Decode(const XLA_FFI_Api* api,
+                                    XLA_FFI_ExecutionContext* ctx,
+                                    DiagnosticEngine&) {
+    return api->internal_api->XLA_FFI_INTERNAL_DeviceOrdinal_Get(ctx);
+  }
+};
+
+template <>
+struct CtxDecoding<Allocator> {
+  using Type = se::DeviceMemoryAllocator*;
+
+  static std::optional<Type> Decode(const XLA_FFI_Api* api,
+                                    XLA_FFI_ExecutionContext* ctx,
+                                    DiagnosticEngine&) {
+    void* device_allocator =
+        api->internal_api->XLA_FFI_INTERNAL_DeviceMemoryAllocator_Get(ctx);
+    return reinterpret_cast<se::DeviceMemoryAllocator*>(device_allocator);
   }
 };
 
@@ -315,12 +375,45 @@ struct CtxDecoding<CalledComputation> {
 };
 
 //===----------------------------------------------------------------------===//
+// UserData
+//===----------------------------------------------------------------------===//
+
+// A type tag for automatic decoding user data passed via the execution context.
+template <typename T>
+struct UserData {};
+
+template <typename T>
+struct CtxDecoding<UserData<T>> {
+  using Type = T*;
+
+  static std::optional<Type> Decode(const XLA_FFI_Api* api,
+                                    XLA_FFI_ExecutionContext* ctx,
+                                    DiagnosticEngine& diagnostic) {
+    auto* execution_context = reinterpret_cast<const ExecutionContext*>(
+        api->internal_api->XLA_FFI_INTERNAL_ExecutionContext_Get(ctx));
+
+    if (execution_context == nullptr) {
+      return diagnostic.Emit(
+          "Execution context must be not null to fetch UserData parameter");
+    }
+
+    auto user_data = execution_context->Lookup<T>();
+    if (!user_data.ok()) {
+      return diagnostic.Emit("Failed to get user data from execution context: ")
+             << user_data.status().message();
+    }
+
+    return *std::move(user_data);
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Result encoding
 //===----------------------------------------------------------------------===//
 
 template <>
-struct ResultEncoding<Status> {
-  static XLA_FFI_Error* Encode(const XLA_FFI_Api* api, Status status) {
+struct ResultEncoding<absl::Status> {
+  static XLA_FFI_Error* Encode(const XLA_FFI_Api* api, absl::Status status) {
     return api->internal_api->XLA_FFI_INTERNAL_Error_Forward(&status);
   }
 };

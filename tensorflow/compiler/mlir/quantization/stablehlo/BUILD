@@ -100,6 +100,7 @@ cc_library(
         "//tensorflow/compiler/mlir/quantization/common/quantization_lib:quantization_config",
         "//tensorflow/compiler/mlir/quantization/stablehlo/cc:permutation",
         "//tensorflow/compiler/mlir/quantization/stablehlo/cc:report",
+        "//tensorflow/compiler/mlir/quantization/stablehlo/instrumentations:save_report",
         "//tensorflow/compiler/mlir/quantization/stablehlo/ops:stablehlo_op_quant_spec",
         "//tensorflow/compiler/mlir/quantization/tensorflow:passes",
         "//tensorflow/compiler/mlir/quantization/tensorflow:quantization_options_proto_cc",
@@ -343,6 +344,7 @@ cc_library(
         "@local_xla//xla/mlir_hlo:mhlo_passes",
         "@local_xla//xla/translate/hlo_to_mhlo:attribute_importer",
         "@stablehlo//:chlo_ops",
+        "@stablehlo//:stablehlo_passes",
     ],
 )
 
@@ -656,8 +658,8 @@ tf_cc_test(
         "@llvm-project//mlir:QuantOps",
         "@llvm-project//mlir:SparseTensorDialect",
         "@llvm-project//mlir:Support",
-        "@local_tsl//tsl/framework:numeric_types",
         "@local_xla//xla/mlir_hlo",
+        "@local_xla//xla/tsl/framework:numeric_types",
     ],
 )
 
@@ -705,8 +707,8 @@ tf_cc_test(
         "@llvm-project//mlir:QuantOps",
         "@llvm-project//mlir:SparseTensorDialect",
         "@llvm-project//mlir:Support",
-        "@local_tsl//tsl/framework:numeric_types",
         "@local_xla//xla/mlir_hlo",
+        "@local_xla//xla/tsl/framework:numeric_types",
     ],
 )
 

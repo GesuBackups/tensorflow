@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/tsl/concurrency/async_value_ref.h"
 
+#include <any>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -41,6 +42,103 @@ class WrappedInt32 {
 };
 
 constexpr int32_t kTestValue = 42;
+
+TEST(AsyncValueRefTest, MakeUnconstructedStatusOrOfAny) {
+  auto value = MakeUnconstructedAsyncValueRef<absl::StatusOr<std::any>>();
+  EXPECT_TRUE(value.IsUnavailable());
+}
+
+TEST(AsyncValueRefTest, MakeUnconstructedStatusOr) {
+  auto value = MakeUnconstructedAsyncValueRef<absl::StatusOr<int32_t>>();
+  EXPECT_TRUE(value.IsUnavailable());
+}
+
+TEST(AsyncValueRefTest, MakeConstructedStatusOr) {
+  auto value = MakeConstructedAsyncValueRef<absl::StatusOr<int32_t>>(42);
+  EXPECT_TRUE(value.IsUnavailable());
+}
+
+TEST(AsyncValueRefTest, MakeAvailableStatusOr) {
+  auto value = MakeAvailableAsyncValueRef<absl::StatusOr<int32_t>>(42);
+  EXPECT_TRUE(value.IsAvailable());
+  EXPECT_EQ(**value, 42);
+}
+
+TEST(AsyncValueRefTest, ImplicitValueConversion) {
+  auto payload = []() -> AsyncValueRef<WrappedInt32> {
+    return WrappedInt32{42};
+  }();
+
+  EXPECT_TRUE(payload.IsConcrete());
+  EXPECT_EQ(payload->value(), 42);
+}
+
+TEST(AsyncValueRefTest, ImplicitStatusConversion) {
+  auto error = []() -> AsyncValueRef<WrappedInt32> {
+    return absl::InternalError("Error");
+  }();
+
+  EXPECT_TRUE(error.IsAvailable());
+  EXPECT_TRUE(error.IsError());
+  EXPECT_EQ(error.GetError(), absl::InternalError("Error"));
+}
+
+TEST(AsyncValueRefTest, ImplicitStatusConversionWithStatusPayload) {
+  auto status = []() -> absl::StatusOr<absl::Status> {
+    return absl::InternalError("Error");
+  }();
+
+  auto error = []() -> AsyncValueRef<absl::Status> {
+    return absl::InternalError("Error");
+  }();
+
+  // Check that AsyncValueRef<absl::Status> behavior is consistent with
+  // absl::StatusOr<absl::Status> for implicit error conversion.
+
+  ASSERT_TRUE(status.ok());
+  ASSERT_EQ(*status, absl::InternalError("Error"));
+
+  EXPECT_TRUE(error.IsConcrete());
+  EXPECT_EQ(error.get(), absl::InternalError("Error"));
+}
+
+TEST(AsyncValueRefTest, ImplicitStatusConversionWithStatusOrPayload) {
+  auto status = []() -> absl::StatusOr<absl::StatusOr<int32_t>> {
+    return absl::StatusOr<int32_t>(absl::InternalError("Error"));
+  }();
+
+  auto error = []() -> AsyncValueRef<absl::StatusOr<int32_t>> {
+    return absl::StatusOr<int32_t>(absl::InternalError("Error"));
+  }();
+
+  // Check that AsyncValueRef<absl::StatusOr<T>> behavior is consistent with
+  // absl::StatusOr<absl::StatusOr<T>> for implicit error conversion.
+
+  ASSERT_TRUE(status.ok());
+  ASSERT_EQ(status->status(), absl::InternalError("Error"));
+
+  EXPECT_TRUE(error.IsConcrete());
+  EXPECT_EQ(error->status(), absl::InternalError("Error"));
+}
+
+TEST(AsyncValueRefTest, ImplicitStatusConversionWithStatusOrPayloadAndStatus) {
+  auto status = []() -> absl::StatusOr<absl::StatusOr<int32_t>> {
+    return absl::InternalError("Error");
+  }();
+
+  auto error = []() -> AsyncValueRef<absl::StatusOr<int32_t>> {
+    return absl::InternalError("Error");
+  }();
+
+  // Check that AsyncValueRef<absl::StatusOr<T>> behavior is consistent with
+  // absl::StatusOr<absl::StatusOr<T>> for implicit error conversion.
+
+  ASSERT_FALSE(status.ok());
+  ASSERT_EQ(status.status(), absl::InternalError("Error"));
+
+  EXPECT_TRUE(error.IsError());
+  EXPECT_EQ(error.GetError(), absl::InternalError("Error"));
+}
 
 TEST(AsyncValueRefTest, ValueCheck) {
   auto wrapped_int_value = MakeAvailableAsyncValueRef<WrappedInt32>(kTestValue);
@@ -246,36 +344,54 @@ TEST(AsyncValueRefTest, MapMultipleTimes) {
   EXPECT_EQ(mapped.get(), 42 + 6);
 }
 
-TEST(AsyncValueRefTest, MapStatusOr) {
+TEST(AsyncValuePtrTest, MapToStatus) {
+  AsyncValueRef<int32_t> ref = MakeAvailableAsyncValueRef<int32_t>(42);
+
+  AsyncValueRef<absl::Status> mapped_to_status =
+      ref.Map([](int32_t value) -> absl::Status { return absl::OkStatus(); });
+  EXPECT_TRUE(mapped_to_status.IsAvailable());
+  EXPECT_EQ(mapped_to_status.get(), absl::OkStatus());
+}
+
+TEST(AsyncValueRefTest, MapToStatusOr) {
+  AsyncValueRef<int32_t> ref = MakeAvailableAsyncValueRef<int32_t>(42);
+
+  AsyncValueRef<absl::StatusOr<float>> mapped_to_float =
+      ref.Map([](int32_t value) -> absl::StatusOr<float> { return value; });
+  EXPECT_TRUE(mapped_to_float.IsAvailable());
+  EXPECT_EQ(*mapped_to_float.get(), 42.0f);
+}
+
+TEST(AsyncValueRefTest, TryMap) {
   AsyncValueRef<int32_t> ref = MakeAvailableAsyncValueRef<int32_t>(42);
 
   AsyncValueRef<float> mapped_to_float =
-      ref.Map([](int32_t value) -> absl::StatusOr<float> { return value; });
+      ref.TryMap([](int32_t value) -> absl::StatusOr<float> { return value; });
   EXPECT_TRUE(mapped_to_float.IsAvailable());
   EXPECT_EQ(mapped_to_float.get(), 42.0f);
 }
 
-TEST(AsyncValueRefTest, MapStatusOrError) {
+TEST(AsyncValueRefTest, TryMapError) {
   AsyncValueRef<int32_t> ref = MakeAvailableAsyncValueRef<int32_t>(42);
 
   AsyncValueRef<float> mapped_to_float =
-      ref.Map([](int32_t value) -> absl::StatusOr<float> {
+      ref.TryMap([](int32_t value) -> absl::StatusOr<float> {
         return absl::InternalError("error");
       });
   EXPECT_TRUE(mapped_to_float.IsError());
   EXPECT_EQ(mapped_to_float.GetError(), absl::InternalError("error"));
 }
 
-TEST(AsyncValueRefTest, MapStatusOrConstructible) {
+TEST(AsyncValueRefTest, TryMapConstructible) {
   AsyncValueRef<int32_t> ref = MakeAvailableAsyncValueRef<int32_t>(42);
 
   struct X {
-    explicit X(absl::StatusOr<float> value) : value(*value) {}
+    explicit X(float value) : value(value) {}
     float value;
   };
 
-  AsyncValueRef<X> mapped_to_x =
-      ref.Map<X>([](int32_t value) -> absl::StatusOr<float> { return value; });
+  AsyncValueRef<X> mapped_to_x = ref.TryMap<X>(
+      [](int32_t value) -> absl::StatusOr<float> { return value; });
   EXPECT_TRUE(mapped_to_x.IsAvailable());
   EXPECT_EQ(mapped_to_x->value, 42.0f);
 }
@@ -368,11 +484,11 @@ TEST(AsyncValueRefTest, MapUnavailableOnExecutor) {
   EXPECT_EQ(mapped_to_float.get(), 42.0f);
 }
 
-TEST(AsyncValueRefTest, MapStatusOrOnExecutor) {
+TEST(AsyncValueRefTest, TryMapOnExecutor) {
   AsyncValueRef<int32_t> ref = MakeConstructedAsyncValueRef<int32_t>(42);
 
   DeferredExecutor executor;
-  AsyncValueRef<float> mapped_to_float = ref.Map(
+  AsyncValueRef<float> mapped_to_float = ref.TryMap(
       executor, [](int32_t value) -> absl::StatusOr<float> { return value; });
 
   ref.SetStateConcrete();
@@ -385,12 +501,12 @@ TEST(AsyncValueRefTest, MapStatusOrOnExecutor) {
   EXPECT_EQ(mapped_to_float.get(), 42.0f);
 }
 
-TEST(AsyncValueRefTest, MapStatusOrErrorOnExecutor) {
+TEST(AsyncValueRefTest, TryMapErrorOnExecutor) {
   AsyncValueRef<int32_t> ref = MakeConstructedAsyncValueRef<int32_t>(42);
 
   DeferredExecutor executor;
   AsyncValueRef<float> mapped_to_float =
-      ref.Map(executor, [](int32_t value) -> absl::StatusOr<float> {
+      ref.TryMap(executor, [](int32_t value) -> absl::StatusOr<float> {
         return absl::InternalError("error");
       });
 
