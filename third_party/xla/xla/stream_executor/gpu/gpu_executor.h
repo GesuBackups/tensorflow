@@ -30,6 +30,7 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
@@ -66,6 +67,7 @@ class StreamExecutor;
 
 namespace gpu {
 
+class GpuEvent;
 class GpuKernel;
 class GpuCommandBuffer;
 class GpuStream;
@@ -121,11 +123,11 @@ class GpuExecutor : public StreamExecutorCommon {
 
   int device_ordinal() const override { return device_ordinal_; };
 
-  absl::Status GetKernel(const MultiKernelLoaderSpec& spec,
-                         Kernel* kernel) override;
+  absl::StatusOr<std::unique_ptr<Kernel>> LoadKernel(
+      const MultiKernelLoaderSpec& spec) override;
 
-  // (supported on CUDA only)
-  void UnloadKernel(const Kernel* kernel) override;
+  // Releases any state associated with the previously loaded kernel.
+  void UnloadKernel(const Kernel* kernel);
   absl::Status LoadModule(const MultiModuleLoaderSpec& spec,
                           ModuleHandle* module_handle) override;
   bool UnloadModule(ModuleHandle module_handle) override;
@@ -144,9 +146,6 @@ class GpuExecutor : public StreamExecutorCommon {
                       const BlockDim& block_dims,
                       const ClusterDim& cluster_dims, const Kernel& kernel,
                       const KernelArgs& args) override;
-
-  absl::Status Submit(Stream* stream,
-                      const CommandBuffer& command_buffer) override;
 
   DeviceMemoryBase Allocate(uint64_t size, int64_t memory_space) override;
 
@@ -203,9 +202,6 @@ class GpuExecutor : public StreamExecutorCommon {
                                  const DeviceMemoryBase& gpu_src,
                                  uint64_t size) override;
 
-  absl::Status Memset(Stream* stream, DeviceMemoryBase* location,
-                      uint8_t pattern, uint64_t size) override;
-
   void DeallocateStream(Stream* stream) override;
 
   absl::Status BlockHostUntilDone(Stream* stream) override;
@@ -236,10 +232,7 @@ class GpuExecutor : public StreamExecutorCommon {
   absl::StatusOr<std::unique_ptr<Event>> CreateEvent() override;
 
   absl::StatusOr<std::unique_ptr<Stream>> CreateStream(
-      std::optional<std::variant<StreamPriority, int>> priority =
-          std::nullopt) override;
-
-  absl::StatusOr<std::unique_ptr<Kernel>> CreateKernel() override;
+      std::optional<std::variant<StreamPriority, int>> priority) override;
 
   absl::StatusOr<std::unique_ptr<CommandBuffer>> CreateCommandBuffer(
       CommandBuffer::Mode mode) override;
@@ -330,6 +323,12 @@ class GpuExecutor : public StreamExecutorCommon {
 
   bool UnloadGpuBinary(const void* gpu_binary)
       TF_EXCLUSIVE_LOCKS_REQUIRED(in_memory_modules_mu_);
+
+  // Creates a GpuEvent for the given stream.
+  absl::StatusOr<std::unique_ptr<GpuEvent>> CreateGpuEvent(bool allow_timing);
+
+  // Returns true if a delay kernel is supported for the given stream.
+  absl::StatusOr<bool> DelayKernelIsSupported(GpuStream* stream);
 
   // Guards the on-disk-module mapping.
   absl::Mutex disk_modules_mu_;

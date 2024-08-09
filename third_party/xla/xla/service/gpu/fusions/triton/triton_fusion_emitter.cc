@@ -110,9 +110,9 @@ limitations under the License.
 #include "xla/service/algorithm_util.h"
 #include "xla/service/dump.h"
 #include "xla/service/gpu/backend_configs.pb.h"
+#include "xla/service/gpu/fusions/ir/xla_gpu_ops.h"
 #include "xla/service/gpu/fusions/mlir/elemental_hlo_to_mlir.h"
-#include "xla/service/gpu/fusions/mlir/ir/xla_gpu_ops.h"
-#include "xla/service/gpu/fusions/mlir/passes.h"
+#include "xla/service/gpu/fusions/transforms/passes.h"
 #include "xla/service/gpu/hlo_traversal.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/launch_dimensions.h"
@@ -340,12 +340,46 @@ Value Cast(ImplicitLocOpBuilder& b, Value value, Type dst_element_ty) {
   }
   // float => int
   if (src_fp_element_ty && mlir::isa<mlir::IntegerType>(dst_element_ty)) {
-    // TODO(b/266862493): Support unsigned integer types.
     if (dst_element_ty.isInteger(1)) {
       return b.create<ma::CmpFOp>(ma::CmpFPredicate::UNE, value,
                                   ZerosLike(b, value));
     }
-    return b.create<ma::FPToSIOp>(dst_ty, value);
+    // TODO(b/266862493): Support unsigned integer types.
+    // The current logic handles signed integer types only. Additional handling
+    // is needed for unsigned integer types.
+    auto cst_int = [&](int64_t x) {
+      if (auto src_shaped_ty = mlir::dyn_cast<ShapedType>(src_ty)) {
+        return CreateConst(b, dst_element_ty, x, src_shaped_ty.getShape());
+      } else {
+        return CreateConst(b, dst_element_ty, x);
+      }
+    };
+    auto cst_float = [&](int64_t x) {
+      if (auto src_shaped_ty = mlir::dyn_cast<ShapedType>(src_ty)) {
+        return CreateConst(b, src_fp_element_ty, x, src_shaped_ty.getShape());
+      } else {
+        return CreateConst(b, src_fp_element_ty, x);
+      }
+    };
+    auto fptosi = b.create<ma::FPToSIOp>(dst_ty, value);
+    int64_t min = llvm::minIntN(dst_element_ty.getIntOrFloatBitWidth());
+    int64_t max = llvm::maxIntN(dst_element_ty.getIntOrFloatBitWidth());
+
+    // value <= static_cast<float>(INT_MIN) ? INT_MIN : ...
+    auto clamped = b.create<mlir::arith::SelectOp>(
+        b.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::OLE, value,
+                                      cst_float(min)),
+        cst_int(min), fptosi);
+    // value >= static_cast<float>(INT_MAX) ? INT_MAX : ...
+    clamped = b.create<mlir::arith::SelectOp>(
+        b.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::OGE, value,
+                                      cst_float(max)),
+        cst_int(max), clamped);
+    // isnan(value) ? 0 : ...
+    return b.create<mlir::arith::SelectOp>(
+        b.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::UNO, value,
+                                      value),
+        cst_int(0), clamped);
   }
 
   LOG(FATAL) << "Type conversion not supported: "
@@ -906,9 +940,10 @@ absl::StatusOr<Value> EmitTiledHloInstruction(
   const HloInstruction* hlo = tiled_hlo.hlo();
 
   if (fusion->IsUserOf(tiled_hlo.hlo())) {
-    auto make_tensor = ir_emitter_triton_internal::CreateMakeTensorPtrOp(
-        b, tile_multi_index, tiled_hlo,
-        fn.getArgument(fusion->operand_index(hlo)));
+    TF_ASSIGN_OR_RETURN(auto make_tensor,
+                        ir_emitter_triton_internal::CreateMakeTensorPtrOp(
+                            b, tile_multi_index, tiled_hlo,
+                            fn.getArgument(fusion->operand_index(hlo))));
 
     return EmitParameterLoad(b, make_tensor.op, make_tensor.boundary_checks);
   }
@@ -1472,7 +1507,7 @@ class MatMulEmitterHelper {
             }
           }
         }
-        CHECK(to_order.insert(current).second);
+        to_order.insert(current);
         to_add.pop();
       }
     }
@@ -1841,7 +1876,7 @@ class MatMulEmitterHelper {
 absl::StatusOr<LaunchDimensions> GetMatMulLaunchDimensions(
     const TritonFusionAnalysis& analysis, const HloFusionAdaptor& fusion,
     const TritonGemmConfig& config) {
-  auto dot = HloFindIf(fusion.GetRoots(), fusion, [](auto node) {
+  auto dot = HloBfsFindIf(fusion.GetRoots(), fusion, [](auto node) {
     return node.opcode() == HloOpcode::kDot;
   });
   TF_RET_CHECK(dot != std::nullopt);
@@ -2176,7 +2211,7 @@ absl::Status EmitMatMul(mlir::OpBuilder builder,
 
   // TODO(b/320659359) Allow TF32 for 8-bit or less types with F32.
   bool is_unsupported_bitwidth =
-      HloAnyOf({dot_instr}, [&](const HloInstruction* node) {
+      HloBfsAnyOf({dot_instr}, [&](const HloInstruction* node) {
         if (node->opcode() != HloOpcode::kConvert) {
           return false;
         }
@@ -2498,8 +2533,9 @@ absl::Status EmitMatMul(mlir::OpBuilder builder,
 
 // Computes the base pointer offset for the given tile multi-index and hlo shape
 // taking into account the physical layout of the hlo buffer.
-Value ComputeBasePtrOffset(ImplicitLocOpBuilder b, ValueRange tile_multi_index,
-                           const TiledHloInstruction& tiled_hlo) {
+absl::StatusOr<Value> ComputeBasePtrOffset(
+    ImplicitLocOpBuilder b, ValueRange tile_multi_index,
+    const TiledHloInstruction& tiled_hlo) {
   const Shape& shape = tiled_hlo.hlo()->shape();
   Shape linear_shape = ShapeUtil::MakeShape(shape.element_type(),
                                             {ShapeUtil::ElementsIn(shape)});
@@ -2507,8 +2543,12 @@ Value ComputeBasePtrOffset(ImplicitLocOpBuilder b, ValueRange tile_multi_index,
   // Bitcast map gives an indexing map from linear index to the parameter shape
   // index respecting physical layout of the memory.
   auto bitcast_map = GetBitcastMap(shape, linear_shape, b.getContext());
+
+  TF_ASSIGN_OR_RETURN(IndexingMap tile_offsets_indexing,
+                      tiled_hlo.tile_offsets_indexing());
+
   auto compose_indexing_maps =
-      ComposeIndexingMaps(tiled_hlo.tile_offsets_indexing(), bitcast_map);
+      ComposeIndexingMaps(tile_offsets_indexing, bitcast_map);
   compose_indexing_maps.Simplify();
 
   return b.create<ma::IndexCastUIOp>(
@@ -2541,7 +2581,7 @@ SmallVector<Value, 3> ComputeDelinearizedTileIndex(
                                        /*symbols=*/{}, b);
 }
 
-MakeTensorPtrOpAndBoundaryChecks CreateMakeTensorPtrOp(
+absl::StatusOr<MakeTensorPtrOpAndBoundaryChecks> CreateMakeTensorPtrOp(
     ImplicitLocOpBuilder& b, ValueRange tile_multi_index,
     const TiledHloInstruction& tiled_hlo, Value argument_block) {
   llvm::SmallVector<Value> sizes;
@@ -2601,7 +2641,8 @@ MakeTensorPtrOpAndBoundaryChecks CreateMakeTensorPtrOp(
 
   // Manually compute pointer offset to avoid materialized fully parallel
   // dimensions in the tile. Current codegen tried to avoid size-1 dims.
-  Value ptr_offset = ComputeBasePtrOffset(b, tile_multi_index, tiled_hlo);
+  TF_ASSIGN_OR_RETURN(Value ptr_offset,
+                      ComputeBasePtrOffset(b, tile_multi_index, tiled_hlo));
   auto tile_ptr = AddPtr(b, argument_block, ptr_offset);
 
   return MakeTensorPtrOpAndBoundaryChecks{b.create<mt::MakeTensorPtrOp>(
@@ -2640,7 +2681,9 @@ absl::Status EmitGeneric(mlir::OpBuilder builder,
 
   TF_ASSIGN_OR_RETURN(TiledHloComputation tiled_hlo_computation,
                       symbolic_tile_analysis.ComputeTiledHloInstructions(
-                          block_level_parameters.output_tile_sizes));
+                          block_level_parameters.output_tile_sizes,
+                          /*constraints_are_known_satisfied=*/false,
+                          /*compute_all_tile_offset_indexing_maps=*/true));
 
   SmallVector<Value, 3> tile_multi_index =
       ir_emitter_triton_internal::ComputeDelinearizedTileIndex(
@@ -2652,9 +2695,10 @@ absl::Status EmitGeneric(mlir::OpBuilder builder,
                      tiled_hlo_computation, fn, tile_multi_index));
 
   const auto& tiled_hlo = *tiled_hlo_computation.GetRoot();
-  auto make_tensor = ir_emitter_triton_internal::CreateMakeTensorPtrOp(
-      b, tile_multi_index, tiled_hlo,
-      fn.getArgument(computation->num_parameters()));
+  TF_ASSIGN_OR_RETURN(auto make_tensor,
+                      ir_emitter_triton_internal::CreateMakeTensorPtrOp(
+                          b, tile_multi_index, tiled_hlo,
+                          fn.getArgument(computation->num_parameters())));
   b.create<mt::StoreOp>(make_tensor.op, result, make_tensor.boundary_checks,
                         mt::CacheModifier::NONE, mt::EvictionPolicy::NORMAL);
 

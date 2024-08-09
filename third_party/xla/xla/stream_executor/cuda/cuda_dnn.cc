@@ -948,21 +948,6 @@ bool BatchnormSpatialPersistentEnabled() {
   return is_enabled;
 }
 
-bool RequireCudnnDeterminism(const NumericOptions& numeric_options) {
-  static bool cudnn_deterministic_env_var = [] {
-    // TODO(reedwm): Remove the TF_CUDNN_DETERMINISTIC env var.
-    bool cudnn_deterministic = false;
-    TF_CHECK_OK(tsl::ReadBoolFromEnvVar("TF_CUDNN_DETERMINISTIC",
-                                        /*default_val=*/false,
-                                        &cudnn_deterministic));
-    return cudnn_deterministic;
-  }();
-  bool require_determinism =
-      cudnn_deterministic_env_var || numeric_options.require_determinism;
-  VLOG(5) << "RequireCudnnDeterminism: " << require_determinism;
-  return require_determinism;
-}
-
 // A helper function to decide whether to force the default conv algorithm.
 bool ConvUseDefaultAlgorithm() {
   static bool use_default = [] {
@@ -1100,7 +1085,7 @@ class CudnnPoolingDescriptor {
     std::transform(shape64.cbegin(), shape64.cend(), shape.begin(),
                    &CheckedNarrowing<int64_t, int>);
     bool propagate_nans = pooling_descriptor.propagate_nans();
-    const auto cudnn_max_pooling_mode = RequireCudnnDeterminism(numeric_options)
+    const auto cudnn_max_pooling_mode = numeric_options.require_determinism
                                             ? CUDNN_POOLING_MAX_DETERMINISTIC
                                             : CUDNN_POOLING_MAX;
     CHECK_CUDNN_OK(cudnnSetPoolingNdDescriptor(
@@ -1764,8 +1749,8 @@ absl::Status CheckAndFetchProjectionWeights(
     int64_t size =
         dims[0] * dims[1] * dims[2] * CudnnDataTypeToByteSize(data_type);
 #endif  // CUDNN_VERSION >= 8100
-    dnn::RnnDescriptor::ParamsRegion region = {
-        reinterpret_cast<int64_t>(offset), size};
+    dnn::RnnDescriptor::ParamsRegion region = {static_cast<int64_t>(offset),
+                                               size};
     weights->push_back(region);
   }
   return absl::OkStatus();
@@ -1906,8 +1891,8 @@ absl::StatusOr<CudnnRnnParamsDescriptor> CudnnRnnParamsDescriptor::Create(
             /*nbDims=*/&n_dims, /*filterDimA=*/dims));
         int64_t size =
             dims[0] * dims[1] * dims[2] * CudnnDataTypeToByteSize(data_type);
-        dnn::RnnDescriptor::ParamsRegion region = {
-            reinterpret_cast<int64_t>(offset), size};
+        dnn::RnnDescriptor::ParamsRegion region = {static_cast<int64_t>(offset),
+                                                   size};
         (type == 0 ? weights : biases).push_back(region);
       }
 #endif  // CUDNN_VERSION >= 8100
@@ -3857,49 +3842,6 @@ absl::StatusOr<cudnn_frontend::Operation> CreateTernaryPwOp(
   RETURN_MSG_IF_CUDNN_ERROR(pw_op_created);
   return pw_op_created;
 }
-
-// Returns a cudnn tensor that's the output of the mask op
-absl::StatusOr<cudnn_frontend::Tensor> CreateCudnnMaskFwdTensor(
-    std::vector<cudnn_frontend::Operation>& ops, absl::Span<const int64_t> dims,
-    absl::Span<const int64_t> strides, dnn::DataType dtype,
-    cudnn_frontend::Tensor& input_tensor) {
-  std::vector<int64_t> mask_dim(dims.size(), 1);
-  std::vector<int64_t> mask_stride(strides.size(), 1);
-
-  // Create the mask tensor
-  TF_ASSIGN_OR_RETURN(
-      auto mask_tensor,
-      CreateCudnnTensor(dims, strides, CudnnfMHAUid::MASK_ID, dtype, 1, -1,
-                        /*is_virtual=*/false));
-  // Create the mask output tensor
-  TF_ASSIGN_OR_RETURN(
-      auto mask_out_tensor,
-      CreateCudnnTensor(dims, strides, CudnnfMHAUid::VIRTUAL_ID + 400,
-                        dnn::DataType::kFloat, 1, -1,
-                        /*is_virtual=*/true));
-
-  auto mask_desc = cudnn_frontend::PointWiseDescBuilder()
-                       .setMode(CUDNN_POINTWISE_MUL)
-                       .setComputeType(CUDNN_DATA_FLOAT)
-                       .build();
-
-  // Create the mask op.
-  auto mask_op = cudnn_frontend::OperationBuilder(
-                     CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-                     .setxDesc(input_tensor)
-                     .setbDesc(mask_tensor)
-                     .setyDesc(mask_out_tensor)
-                     .setpwDesc(mask_desc)
-                     .build();
-
-  RETURN_MSG_IF_CUDNN_ERROR(mask_op);
-
-  RETURN_MSG_IF_CUDNN_ERROR(mask_out_tensor);
-  // Add mask to op list
-  ops.push_back(std::move(mask_op));
-
-  return mask_out_tensor;
-}
 #endif  // CUDNN_VERSION >= 8800
 
 absl::StatusOr<std::unique_ptr<cudnn_frontend::OperationGraph>>
@@ -5062,7 +5004,7 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionOperationGraph(
     const dnn::FMHAMaskKind mask_type) {
   using cudnn_frontend::graph::Tensor_attributes;
 
-#if CUDNN_VERSION >= 8904
+#if CUDNN_VERSION >= 90000
   if (VLOG_IS_ON(4)) {
     VLOG(4) << "\n bmm1_lhs(q): " << q_descriptor.ToString()
             << "\n bmm1_rhs(k): " << k_descriptor.ToString()
@@ -5201,11 +5143,10 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionOperationGraph(
         .set_uid(CudnnfMHAUid::P_ID);
   }
   CudnnGraph cudnnGraph(std::move(graph));
-  TF_ASSIGN_OR_RETURN(bool supported, cudnnGraph.Prepare(dnn_support));
-  if (!supported) {
-    return absl::InternalError("cuDNN graph is not supported.");
-  }
-  TF_RETURN_IF_ERROR(cudnnGraph.Build(dnn_support, std::nullopt));
+  TF_RETURN_IF_ERROR(cudnnGraph.Prepare(
+      dnn_support, NumericOptions{/*require_determinism=*/false,
+                                  /*allow_tf32=*/true}));
+  TF_RETURN_IF_ERROR(cudnnGraph.Build(dnn_support, /*plan_id=*/std::nullopt));
 
   if (VLOG_IS_ON(4)) {
     VLOG(4) << "\b flash attention operation graph: " << graph;
@@ -5213,7 +5154,7 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionOperationGraph(
   return cudnnGraph;
 #else
   return absl::UnimplementedError(
-      "Cudnn flash attention only supported with Cudnn >= 8.9.4");
+      "Cudnn flash attention only supported with Cudnn >= 9.0.0");
 #endif
 }
 
@@ -5229,7 +5170,7 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
     std::optional<double> dropout_rate, std::optional<int64_t> seed,
     double scale, bool use_dropout, bool use_bias, dnn::FMHAMaskKind mask_type,
     bool force_deterministic) {
-#if CUDNN_VERSION >= 8904
+#if CUDNN_VERSION >= 90000
   if (VLOG_IS_ON(4)) {
     VLOG(4) << "\n bmm1_grad_gemm1_rhs(q): " << q_desc.ToString()
             << "\n bmm1_grad_gemm2_rhs(k): " << k_desc.ToString()
@@ -5420,11 +5361,10 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
       .set_data_type(ioDataType);
 
   CudnnGraph cudnnGraph(std::move(graph));
-  TF_ASSIGN_OR_RETURN(bool supported, cudnnGraph.Prepare(dnn_support));
-  if (!supported) {
-    return absl::InternalError("cuDNN graph is not supported.");
-  }
-  TF_RETURN_IF_ERROR(cudnnGraph.Build(dnn_support, std::nullopt));
+  TF_RETURN_IF_ERROR(
+      cudnnGraph.Prepare(dnn_support, NumericOptions{force_deterministic,
+                                                     /*allow_tf32=*/true}));
+  TF_RETURN_IF_ERROR(cudnnGraph.Build(dnn_support, /*plan_id=*/std::nullopt));
 
   if (VLOG_IS_ON(4)) {
     VLOG(4) << "\b flash attention operation backward graph: " << graph;
@@ -5433,7 +5373,7 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
   return cudnnGraph;
 #else
   return absl::UnimplementedError(
-      "Cudnn flash attention only supported with Cudnn >= 8.9.4");
+      "Cudnn flash attention only supported with Cudnn >= 9.0.0");
 #endif
 }
 
@@ -6217,16 +6157,16 @@ absl::Status CreateOpRunners(
     bool need_side_input, const NumericOptions& numeric_options) {
   cudnn_frontend::EngineConfigList filtered_configs;
   const bool disable_winograd = !CudnnEnvVar<WinogradNonfused>::IsEnabled();
-  const bool disable_nondeterminism = RequireCudnnDeterminism(numeric_options);
   const bool disable_tensor_core =
       !IsTensorMathEnabled(stream, input_type, numeric_options.allow_tf32);
   auto generic_filter_fn = [=](cudnnBackendDescriptor_t engine_config) -> bool {
     return GenericEngineFilter(engine_config, disable_winograd,
-                               disable_nondeterminism, disable_tensor_core);
+                               numeric_options.require_determinism,
+                               disable_tensor_core);
   };
   VLOG(4) << "Filtering engine configs with disable_winograd="
           << disable_winograd
-          << ", disable_nondeterminism=" << disable_nondeterminism
+          << ", disable_nondeterminism=" << numeric_options.require_determinism
           << ", disable_tensor_core=" << disable_tensor_core;
 
   std::array<std::string, 1> heur_mode = {use_fallback ? "heuristics_fallback"
@@ -6305,7 +6245,7 @@ absl::Status CreateOpRunners(
         std::move(runner_or).value()));
 
     // We will use the first working plan when determinism is required.
-    if (RequireCudnnDeterminism(numeric_options)) {
+    if (numeric_options.require_determinism) {
       break;
     }
   }
@@ -7203,7 +7143,7 @@ CudnnSupport::FusedMHARunnerFromDesc(
     std::optional<dnn::TensorDescriptor> bias_descriptor, double scale,
     std::optional<double> dropout_rate, std::optional<int64_t> seed,
     dnn::FMHAMaskKind mask_type) {
-#if CUDNN_VERSION >= 8904
+#if CUDNN_VERSION >= 90000
   auto cudnn = cudnn_->GetHandle(parent_, stream);
   bool use_dropout = dropout_rate && *dropout_rate > 0.0;
   std::vector<int64_t> intermediate_shape;
@@ -7249,8 +7189,8 @@ CudnnSupport::FusedMHARunnerFromDesc(
       std::move(runner))};
 #else
   return absl::UnimplementedError(
-      "Cudnn flash attention are only supported with Cudnn >= 8.9.4");
-#endif  // CUDNN_VERSION >= 8904
+      "Cudnn flash attention are only supported with Cudnn >= 9.0.0");
+#endif  // CUDNN_VERSION >= 90000
 }
 
 absl::StatusOr<std::unique_ptr<const dnn::FusedMHABackwardRunner>>
@@ -7270,7 +7210,7 @@ CudnnSupport::FusedMHABackwardRunnerFromDesc(
     std::optional<dnn::TensorDescriptor> bias_descriptor, double scale,
     std::optional<double> dropout_rate, std::optional<int64_t> seed,
     dnn::FMHAMaskKind mask_type, bool force_deterministic) {
-#if CUDNN_VERSION >= 8904
+#if CUDNN_VERSION >= 90000
   auto cudnn = cudnn_->GetHandle(parent_, stream);
 
   bool use_dropout = dropout_rate && *dropout_rate > 0.0;
@@ -7320,8 +7260,8 @@ CudnnSupport::FusedMHABackwardRunnerFromDesc(
 #else
   return absl::UnimplementedError(
       "Cudnn flash attention bwd are only "
-      "supported with Cudnn >= 8.9.4");
-#endif  // CUDNN_VERSION >= 8904
+      "supported with Cudnn >= 9.0.0");
+#endif  // CUDNN_VERSION >= 90000
 }
 
 bool CudnnSupport::GetRnnAlgorithms(
@@ -7365,7 +7305,7 @@ bool CudnnSupport::GetConvolveBackwardDataAlgorithms(
   if (CudnnEnvVar<WinogradNonfused>::IsEnabled()) {
     algo_types.push_back(CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED);
   }
-  if (!RequireCudnnDeterminism(numeric_options)) {
+  if (numeric_options.require_determinism) {
     algo_types.push_back(CUDNN_CONVOLUTION_BWD_DATA_ALGO_0);
   }
 
@@ -7405,7 +7345,7 @@ bool CudnnSupport::GetConvolveBackwardFilterAlgorithms(
   if (CudnnEnvVar<WinogradNonfused>::IsEnabled()) {
     algo_types.push_back(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD_NONFUSED);
   }
-  if (!RequireCudnnDeterminism(numeric_options)) {
+  if (!numeric_options.require_determinism) {
     algo_types.push_back(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0);
     algo_types.push_back(CUDNN_CONVOLUTION_BWD_FILTER_ALGO_3);
   }
@@ -7943,7 +7883,7 @@ absl::Status CudnnSupport::DoPrepareForCtcLoss(
   // Try running with `algo`, if successful then pick it. The
   // non-deterministic algorithm is first and thus preferentially picked
   // when determinism is not required.
-  auto algo = RequireCudnnDeterminism(numeric_options)
+  auto algo = numeric_options.require_determinism
                   ? CUDNN_CTC_LOSS_ALGO_DETERMINISTIC
                   : CUDNN_CTC_LOSS_ALGO_NON_DETERMINISTIC;
   cudnnStatus_t status = cudnnGetCTCLossWorkspaceSize(
@@ -7955,7 +7895,7 @@ absl::Status CudnnSupport::DoPrepareForCtcLoss(
       /*algo=*/algo,
       /*ctcLossDesc=*/cudnn_ctc_loss_desc.handle(),
       /*sizeInBytes=*/&workspace_size_in_bytes);
-  if (RequireCudnnDeterminism(numeric_options)) {
+  if (numeric_options.require_determinism) {
     RETURN_IF_CUDNN_ERROR(status);
   }
 
@@ -8374,18 +8314,20 @@ absl::StatusOr<std::unique_ptr<dnn::DnnGraph>> CudnnSupport::DeserializeGraph(
   return std::make_unique<CudnnGraph>(std::move(graph));
 }
 
-absl::StatusOr<bool> CudnnGraph::Prepare(dnn::DnnSupport& dnn_support) {
+absl::Status CudnnGraph::Prepare(dnn::DnnSupport& dnn_support,
+                                 const NumericOptions& numeric_options) {
   const CudnnSupport& cudnn_support = static_cast<CudnnSupport&>(dnn_support);
   TF_ASSIGN_OR_RETURN(auto cudnn, cudnn_support.cudnn_->GetLocalHandle());
   RETURN_IF_CUDNN_FRONTEND_ERROR(graph_.validate());
   RETURN_IF_CUDNN_FRONTEND_ERROR(graph_.build_operation_graph(cudnn->handle()));
+  if (numeric_options.require_determinism) {
+    graph_.deselect_numeric_notes(
+        {cudnn_frontend::NumericalNote_t::NONDETERMINISTIC});
+  }
   RETURN_IF_CUDNN_FRONTEND_ERROR(
       graph_.create_execution_plans({cudnn_frontend::HeurMode_t::A}));
-  if (auto result = graph_.check_support(cudnn->handle()); result.is_bad()) {
-    VLOG(3) << result.get_message();
-    return false;
-  }
-  return true;
+  RETURN_IF_CUDNN_FRONTEND_ERROR(graph_.check_support(cudnn->handle()));
+  return absl::OkStatus();
 }
 
 absl::Status CudnnGraph::Build(dnn::DnnSupport& dnn_support,

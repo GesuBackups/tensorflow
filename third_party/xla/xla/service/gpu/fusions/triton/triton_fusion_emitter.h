@@ -17,7 +17,6 @@ limitations under the License.
 #define XLA_SERVICE_GPU_FUSIONS_TRITON_TRITON_FUSION_EMITTER_H_
 
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <string>
 
@@ -87,19 +86,6 @@ absl::Status EmitMatMul(mlir::OpBuilder b, absl::string_view libdevice_path,
                         mlir::triton::FuncOp fn,
                         const BlockLevelParameters& block_level_parameters);
 
-// Generate Softmax in Triton IR inside 'fn'.
-// Use execution parameters from 'block_level_parameters'.
-absl::Status EmitSoftMax(mlir::OpBuilder b, absl::string_view libdevice_path,
-                         const se::DeviceDescription& device_info,
-                         const HloFusionInstruction* fusion,
-                         mlir::triton::FuncOp fn,
-                         const BlockLevelParameters& block_level_parameters);
-
-using TritonIrEmitter = std::function<absl::Status(
-    mlir::OpBuilder, absl::string_view, const se::DeviceDescription&,
-    const HloFusionInstruction*, mlir::triton::FuncOp,
-    const BlockLevelParameters&)>;
-
 // Load the MLIR dialects required for Triton IR generation.
 void LoadMlirDialectsForTriton(mlir::MLIRContext& mlir_context);
 
@@ -166,7 +152,7 @@ struct MakeTensorPtrOpAndBoundaryChecks {
   llvm::SmallVector<int32_t> boundary_checks;
 };
 
-MakeTensorPtrOpAndBoundaryChecks CreateMakeTensorPtrOp(
+absl::StatusOr<MakeTensorPtrOpAndBoundaryChecks> CreateMakeTensorPtrOp(
     mlir::ImplicitLocOpBuilder& b, mlir::ValueRange tile_multi_index,
     const TiledHloInstruction& tiled_hlo, mlir::Value argument_block);
 }  // namespace ir_emitter_triton_internal

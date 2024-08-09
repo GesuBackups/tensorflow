@@ -78,9 +78,9 @@ limitations under the License.
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tests/test_utils.h"
 #include "xla/tests/verified_hlo_module.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/protobuf.h"  // IWYU pragma: keep
 #include "tsl/platform/status.h"
@@ -8282,6 +8282,65 @@ TEST_F(MemorySpaceAssignmentTest, HoistCopyStart) {
   }
 }
 
+TEST_F(MemorySpaceAssignmentTest, WindowPrefetch) {
+  absl::string_view hlo_string = R"(
+HloModule module, is_scheduled=true
+
+%fused_computation {
+  %p0 = bf16[64,8]{1,0:T(8,128)(2,1)} parameter(0)
+  %p1 = bf16[64,8]{1,0:T(8,128)(2,1)} parameter(1)
+  %p2 = bf16[64,8]{1,0:T(8,128)(2,1)} parameter(2)
+  %add0 = bf16[64,8]{1,0:T(8,128)(2,1)} add(%p0, %p1)
+  ROOT %add1 = bf16[64,8]{1,0:T(8,128)(2,1)} add(%add0, %p2)
+}
+
+entry {
+  %p0 = bf16[64,8]{1,0:T(8,128)(2,1)} parameter(0)
+  %p1 = bf16[64,8]{1,0:T(8,128)(2,1)} parameter(1)
+  %p2 = bf16[64,8]{1,0:T(8,128)(2,1)} parameter(2)
+  ROOT fusion = bf16[64,8]{1,0:T(8,128)(2,1)} fusion(bf16[64,8]{1,0:T(8,128)(2,1)} %p0, bf16[64,8]{1,0:T(8,128)(2,1)} %p1, bf16[64,8]{1,0:T(8,128)(2,1)} %p2), kind=kLoop, calls=%fused_computation
+}
+
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  // Get info about window prefetch buffers, such as which operands they
+  // correspond to and their sizes.
+  auto window_prefetch_detail_fn = [&](const HloInstruction* instruction) {
+    WindowPrefetchDetail window_prefetch_detail;
+    const HloInstruction* fusion = FindInstruction(module.get(), "fusion");
+    if (instruction == fusion) {
+      for (int i = 0; i < 3; ++i) {
+        auto* operand = window_prefetch_detail.add_windows();
+        operand->set_operand(i);
+        operand->set_size(32);
+      }
+    }
+    return window_prefetch_detail;
+  };
+
+  Options options = DefaultMemorySpaceOptions();
+  options.enable_window_prefetch = true;
+  options.window_prefetch_detail_fn = window_prefetch_detail_fn;
+  AssignMemorySpace(module.get(), options, /*max_prefetch_interval=*/10,
+                    /*min_prefetch_interval=*/0);
+  const HloInstruction* fusion = FindInstruction(module.get(), "fusion");
+  // The fusion instruction should have 5 operands: the 3 original operands
+  // plus 2 window prefetch buffers.
+  EXPECT_EQ(fusion->operand_count(), 5);
+
+  // The root of the fusion should be a WindowPrefetchBuffer. The first operand
+  // should be the original root, and the second and third operands should be
+  // the window prefetch buffers.
+  HloInstruction* root = fusion->fused_expression_root();
+  EXPECT_TRUE(root->IsCustomCall("WindowPrefetchBuffer"));
+  EXPECT_EQ(root->operand_count(), 3);
+  EXPECT_EQ(root->operand(1), fusion->fused_parameter(3));
+  EXPECT_EQ(root->operand(2), fusion->fused_parameter(4));
+  VLOG(2) << "module: " << module->ToString();
+}
+
 using AsynchronousCopyOrderingTest = ::testing::Test;
 
 TEST_F(AsynchronousCopyOrderingTest, Simple) {
@@ -9864,6 +9923,34 @@ ENTRY %main {
                          op::Fusion()));
 }
 
+TEST_F(MemorySpaceAssignmentTest, CrossProgramPrefetchPermissiveMode) {
+  absl::string_view hlo_string = R"(
+HloModule module, is_scheduled=true
+
+fused_computation {
+  param_0 = f32[2] parameter(0)
+  param_1 = f32[4,2] parameter(1)
+  broadcast = f32[4,2] broadcast(param_0), dimensions={1}
+  ROOT multiply = f32[4,2] multiply(broadcast, param_1)
+}
+
+ENTRY entry {
+  p0 = f32[2] parameter(0)
+  p1 = f32[4,2] parameter(1)
+  fusion = f32[4,2] fusion(p0, p1), kind=kLoop, calls=fused_computation
+  ROOT negate = f32[4,2] negate(fusion)
+}
+  )";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  Options options = DefaultMemorySpaceOptions();
+  options.cross_program_prefetch_permissive_mode = true;
+  AssignMemorySpace(module.get(), options);
+  auto cross_program_prefetches = module->CrossProgramPrefetches();
+  EXPECT_EQ(cross_program_prefetches.size(), 1);
+}
+
 // Test description:
 // - Setup: Make sure p1 can not be prefetched to alternate memory until after
 //   instruction c. We do this by causing p0 to be prefetched to alternate
@@ -9897,7 +9984,9 @@ ENTRY main {
   options.max_size_in_bytes = 300;
 
   // Setup cost analysis so it takes 2 instructions to prefetch anything.
-  HloCostAnalysis hlo_cost_analysis(ShapeSize);
+  HloCostAnalysis::Properties properties;
+  properties[HloCostAnalysis::kBytesAccessedKey] = kBytesPerSecond;
+  HloCostAnalysis hlo_cost_analysis(ShapeSize, properties);
   CostAnalysisOptions cost_analysis_options;
   HloCostAnalysisCosts hlo_cost_analysis_costs(hlo_cost_analysis);
   TF_ASSERT_OK_AND_ASSIGN(

@@ -148,7 +148,6 @@ cc_library(
         ":rocm_driver",
         "//xla/stream_executor",
         "//xla/stream_executor/gpu:gpu_event_header",
-        "//xla/stream_executor/gpu:gpu_executor_header",
         "//xla/stream_executor/gpu:gpu_stream_header",
     ]),
 )
@@ -185,6 +184,7 @@ cc_library(
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
+        "@local_config_rocm//rocm:rocm_headers",
         "@local_tsl//tsl/platform:env",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:fingerprint",

@@ -186,6 +186,7 @@ class _Optimizer(metaclass=abc.ABCMeta):
     return hash(tuple(self.__dict__.items()))
 
 
+@tf_export("tpu.experimental.embedding.CustomOptimizer")
 class CustomOptimizer(_Optimizer):
   """Optimization parameters for custom optimizer for TPU embeddings.
 
@@ -304,9 +305,9 @@ class CustomOptimizer(_Optimizer):
     )
     # We need to convert the slot names and initializers to tuples to make
     # them hashable.
-    self._slot_names_attr = tuple(slot_names if slot_names else [])
+    self._slot_names_attr = tuple(slot_names if slot_names else ())
     self._slot_initializers_attr = tuple(
-        slot_initializers if slot_initializers else []
+        slot_initializers if slot_initializers else ()
     )
     num_slot_names = len(self._slot_names_attr)
     num_slot_initializers = len(self._slot_initializers_attr)
@@ -316,7 +317,7 @@ class CustomOptimizer(_Optimizer):
           " the number of slot_initializers"
           f" ({num_slot_initializers})."
       )
-    self._hyperparameters = hyperparameters
+    self._hyperparameters = tuple(hyperparameters if hyperparameters else ())
     self._custom_computation = custom_computation
 
   def _slot_names(self) -> List[Text]:
@@ -338,8 +339,8 @@ class CustomOptimizer(_Optimizer):
     )
 
   @property
-  def hyperparameters(self) -> List[Union[float, Callable[[], float]]]:
-    return self._hyperparameters or []
+  def hyperparameters(self) -> Tuple[Union[float, Callable[[], float]], ...]:
+    return self._hyperparameters
 
   @property
   def custom_computation(self) -> core.ConcreteFunction:

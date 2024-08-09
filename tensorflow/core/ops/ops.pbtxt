@@ -4112,6 +4112,8 @@ op {
     allowed_values {
       list {
         s: "PAD_UP"
+        s: "BATCH_DOWN"
+        s: "MINIMIZE_TPU_COST_PER_REQUEST"
       }
     }
   }
@@ -33011,6 +33013,13 @@ op {
     }
   }
   attr {
+    name: "use_unbounded_threadpool"
+    type: "bool"
+    default_value {
+      b: false
+    }
+  }
+  attr {
     name: "metadata"
     type: "string"
     default_value {
@@ -44711,6 +44720,13 @@ op {
       b: true
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
   is_stateful: true
 }
 op {
@@ -44746,6 +44762,13 @@ op {
     type: "bool"
     default_value {
       b: true
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
   is_stateful: true
@@ -44785,6 +44808,13 @@ op {
       b: true
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
   is_stateful: true
 }
 op {
@@ -44822,6 +44852,13 @@ op {
       b: true
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
   is_stateful: true
 }
 op {
@@ -44857,6 +44894,13 @@ op {
     type: "bool"
     default_value {
       b: true
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
   is_stateful: true
@@ -49725,6 +49769,13 @@ op {
       b: false
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
 }
 op {
   name: "ScatterNdMax"
@@ -49788,6 +49839,13 @@ op {
     type: "bool"
     default_value {
       b: false
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
 }
@@ -49855,6 +49913,13 @@ op {
       b: false
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
 }
 op {
   name: "ScatterNdNonAliasingAdd"
@@ -49910,6 +49975,13 @@ op {
         type: DT_INT32
         type: DT_INT64
       }
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
 }
@@ -49977,6 +50049,13 @@ op {
       b: false
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
 }
 op {
   name: "ScatterNdUpdate"
@@ -50017,6 +50096,13 @@ op {
     type: "bool"
     default_value {
       b: true
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
 }
@@ -63074,6 +63160,13 @@ op {
       }
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
 }
 op {
   name: "TensorScatterMax"
@@ -63105,6 +63198,13 @@ op {
         type: DT_INT32
         type: DT_INT64
       }
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
 }
@@ -63140,6 +63240,13 @@ op {
       }
     }
   }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
+    }
+  }
 }
 op {
   name: "TensorScatterSub"
@@ -63171,6 +63278,13 @@ op {
         type: DT_INT32
         type: DT_INT64
       }
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
 }
@@ -63206,6 +63320,13 @@ op {
         type: DT_INT64
         type: DT_UINT16
       }
+    }
+  }
+  attr {
+    name: "bad_indices_policy"
+    type: "string"
+    default_value {
+      s: ""
     }
   }
 }

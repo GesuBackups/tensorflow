@@ -429,6 +429,7 @@ cc_library(
         "@local_xla//xla:shape_util",
         "@local_xla//xla:xla_data_proto_cc",
         "@local_xla//xla/client:client_library",
+        "@local_xla//xla/client:executable_build_options",
         "@local_xla//xla/client:local_client",
         "@local_xla//xla/client:xla_computation",
         "@local_xla//xla/service:platform_util",
@@ -666,6 +667,10 @@ cc_library(
     ],
     hdrs = [
         "xla_resource.h",
+    ],
+    visibility = [
+        ":internal",
+        "//learning/deepmind/tensorflow/tpufunc:__pkg__",
     ],
     deps = [
         ":common",

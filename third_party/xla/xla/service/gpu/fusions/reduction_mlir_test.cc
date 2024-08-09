@@ -27,9 +27,10 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/error_spec.h"
 #include "xla/service/gpu/fusions/mlir_emitter_test_base.h"
+#include "xla/service/gpu/hlo_fusion_analysis.h"
 #include "xla/service/gpu/model/indexing_map.h"
 #include "xla/service/gpu/model/indexing_test_utils.h"
-#include "tsl/lib/core/status_test_util.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 
 namespace xla {
 namespace gpu {
@@ -399,8 +400,8 @@ TEST_F(MlirRowReductionTest, NonPowerOfTwoRowReduction) {
       ROOT fusion = f32[100] fusion(a, c), kind=kInput, calls=fused_computation
     })";
   TF_EXPECT_OK(EmitAndCheckIR(kHloString, R"(
-    // CHECK-DAG: #[[MAP1:.*]] = affine_map<(d0, d1)[s0] -> ((d1 mod 64) * 2 + s0 * 128 + d0)>
-    // CHECK-DAG: #[[MAP2:.*]] = affine_map<(d0, d1) -> ((d1 mod 64) * 2 + d0 + 512)>
+    // CHECK-DAG: #[[MAP1:.*]] = #xla_gpu.indexing_map<(d0, d1)[s0] -> ((d1 mod 64) * 2 + s0 * 128 + d0), domain: d0 in [0, 1], d1 in [0, 255], s0 in [0, 3]>
+    // CHECK-DAG: #[[MAP2:.*]] = #xla_gpu.indexing_map<(d0, d1) -> ((d1 mod 64) * 2 + d0 + 512), domain: d0 in [0, 1], d1 in [0, 255]>
     // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
     // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
     // CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
@@ -408,10 +409,10 @@ TEST_F(MlirRowReductionTest, NonPowerOfTwoRowReduction) {
     // CHECK: %[[FULL_TILES:.*]] = scf.for %[[I:.*]] = %[[C0]] to %[[C4]] step %[[C1]]
     // CHECK-NEXT: scf.for %[[J:.*]] = %[[C0]] to %[[C2]] step %[[C1]]
     // CHECK-NOT: scf.if
-    // CHECK: xla_gpu.apply_indexing #[[MAP1]](%[[J]] in [0, 2), %thread_id_x in [0, 256))[%[[I]] in [0, 5)]
+    // CHECK: xla_gpu.apply_indexing #[[MAP1]](%[[J]], %thread_id_x)[%[[I]]]
     // CHECK: scf.for %[[J:.*]] = %[[C0]] to %[[C2]] step %[[C1]] iter_args(%{{.*}} = %[[FULL_TILES]])
     // CHECK: scf.if
-    // CHECK: xla_gpu.apply_indexing #[[MAP2]](%[[J]] in [0, 2), %thread_id_x in [0, 256))
+    // CHECK: xla_gpu.apply_indexing #[[MAP2]](%[[J]], %thread_id_x)
   )"));
   EXPECT_TRUE(RunAndCompareNoHloPasses(kHloString, ErrorSpec{1e-3}));
 }
@@ -604,7 +605,7 @@ TEST_F(MlirMultiRowReductionTest, TwoGroups) {
                     .value();
 
   auto* root = module->entry_computation()->root_instruction();
-  auto analysis = AnalyzeFusion(*root, device_info_);
+  auto analysis = HloFusionAnalysis::Create(*root, device_info_);
   MlirMultiRowReductionFusion fusion(analysis);
 
   EXPECT_THAT(fusion.GetGroups().grouped_roots,
@@ -635,7 +636,7 @@ TEST_F(MlirMultiRowReductionTest, OneGroup) {
                     .value();
 
   auto* root = module->entry_computation()->root_instruction();
-  auto analysis = AnalyzeFusion(*root, device_info_);
+  auto analysis = HloFusionAnalysis::Create(*root, device_info_);
 
   MlirMultiRowReductionFusion mlir_fusion(analysis);
   EXPECT_THAT(mlir_fusion.GetGroups().grouped_roots, SizeIs(1));
@@ -680,7 +681,7 @@ TEST_F(MlirColumnReductionTest, ColumnReduction) {
 
   auto module = ParseAndReturnVerifiedModule(kHloString).value();
   auto* root = module->entry_computation()->root_instruction();
-  auto analysis = AnalyzeFusion(*root, device_info_);
+  auto analysis = HloFusionAnalysis::Create(*root, device_info_);
   MlirColumnReductionFusion fusion(analysis);
   EXPECT_THAT(
       fusion.ComputeThreadIdToInputIndexing(0, 0, &mlir_context_)->ToString(),
@@ -691,16 +692,16 @@ TEST_F(MlirColumnReductionTest, ColumnReduction) {
           (d3 mod 11) * 32 + d0 mod 32
         )
         domain:
-        d0 in [0, 1024)
-        d1 in [0, 1)
-        d2 in [0, 1)
-        d3 in [0, 143)
-        d4 in [0, 1)
-        d5 in [0, 1)
-        s0 in [0, 33)
-        s1 in [0, 1)
-        (d3 mod 11) * 32 + d0 mod 32 in [0, 321)
-        d0 floordiv 32 + s0 * 32 in [0, 1051)
+        d0 in [0, 1023]
+        d1 in [0, 0]
+        d2 in [0, 0]
+        d3 in [0, 142]
+        d4 in [0, 0]
+        d5 in [0, 0]
+        s0 in [0, 32]
+        s1 in [0, 0]
+        (d3 mod 11) * 32 + d0 mod 32 in [0, 320]
+        d0 floordiv 32 + s0 * 32 in [0, 1050]
       )"));
   EXPECT_THAT(
       fusion.ComputeThreadIdToOutputIndexing(0, &mlir_context_)->ToString(),
@@ -709,15 +710,15 @@ TEST_F(MlirColumnReductionTest, ColumnReduction) {
           d3 floordiv 11, (d3 mod 11) * 32 + d0 floordiv 32
         )
         domain:
-        d0 in [0, 993)
-        d1 in [0, 1)
-        d2 in [0, 1)
-        d3 in [0, 143)
-        d4 in [0, 1)
-        d5 in [0, 1)
-        s0 in [0, 1)
-        (d3 mod 11) * 32 + d0 floordiv 32 in [0, 321)
-        d0 mod 32 in [0, 1)
+        d0 in [0, 992]
+        d1 in [0, 0]
+        d2 in [0, 0]
+        d3 in [0, 142]
+        d4 in [0, 0]
+        d5 in [0, 0]
+        s0 in [0, 0]
+        (d3 mod 11) * 32 + d0 floordiv 32 in [0, 320]
+        d0 mod 32 in [0, 0]
       )"));
   TF_ASSERT_OK(EmitAndCheckIR(kHloString, R"(
     // CHECK: xla_gpu.pure_call @Add_add

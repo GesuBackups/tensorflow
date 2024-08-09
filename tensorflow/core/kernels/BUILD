@@ -556,7 +556,9 @@ cc_library(
     deps = [
         "//tensorflow/core/platform:tensor_float_32_hdr_lib",
         "//tensorflow/core/util:determinism_for_kernels",
+        "//tensorflow/core/util:env_var",
         "@local_xla//xla/stream_executor:numeric_options",
+        "@local_xla//xla/tsl/util:determinism_for_kernels",
     ] + if_static(["//tensorflow/core/platform:tensor_float_32_utils"]),
 )
 
@@ -699,6 +701,7 @@ cc_library(
         "//tensorflow/core/kernels/batching_util:adaptive_shared_batch_scheduler",
         "//tensorflow/core/kernels/batching_util:batch_resource_base",
         "//tensorflow/core/kernels/batching_util:batch_scheduler_hdrs",
+        "//tensorflow/core/kernels/batching_util:batch_scheduler_utils",
         "//tensorflow/core/kernels/batching_util:bounded_executor",
         "//tensorflow/core/kernels/batching_util:concat_split_util",
         "//tensorflow/core/kernels/batching_util:periodic_function_dynamic",
@@ -1645,7 +1648,7 @@ cc_library(
 
 tf_cc_test(
     name = "batch_kernels_test",
-    size = "medium",
+    size = "small",
     srcs = ["batch_kernels_test.cc"],
     features = ["-layering_check"],
     deps = [
@@ -4321,7 +4324,6 @@ tf_kernel_library(
     ]) + if_cuda([
         "@local_config_cuda//cuda:cub_headers",
         "//tensorflow/core/platform:stream_executor",
-        "@local_xla//xla/stream_executor/cuda:cuda_stream",
     ]) + if_rocm([
         "@local_config_rocm//rocm:rocprim",
     ]),
@@ -4671,7 +4673,7 @@ tf_kernel_library(
         "spacetobatch_functor.h",
         "spacetobatch_functor_gpu.cu.cc",
     ],
-    visibility = [":friends"],
+    visibility = ["//visibility:private"],
     deps = [
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
@@ -4714,7 +4716,7 @@ tf_kernel_library(
         "spacetodepth_op.h",
         "spacetodepth_op_gpu.cu.cc",
     ],
-    visibility = [":friends"],
+    visibility = ["//visibility:private"],
     deps = [
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
@@ -5569,6 +5571,8 @@ tf_cuda_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
