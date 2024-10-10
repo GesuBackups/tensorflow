@@ -156,34 +156,33 @@ TEST_F(ScatterFusionTest, ThreadIdIndexing) {
     bl_z in [0, 0],
     chunk_id in [0, 0],
     unroll_id in [0, 0],
-    bl_x * 128 + th_x in [0, 8399],
-    is_simplified: true
+    bl_x * 128 + th_x in [0, 8399]
   )";
   mlir::SmallVector<std::string> dim_names = {"th_x", "th_y", "th_z",
                                               "bl_x", "bl_y", "bl_z"};
-  mlir::SmallVector<std::string> symbol_names = {"chunk_id", "unroll_id"};
+  mlir::SmallVector<std::string> range_names = {"chunk_id", "unroll_id"};
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(
                    /*root_index=*/0, /*hero_operand_index=*/3, &mlir_context_),
-               dim_names, symbol_names),
+               dim_names, range_names, {}),
       MatchIndexingString(kUpdatesIndexing));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(
                    /*root_index=*/0, /*hero_operand_index=*/4, &mlir_context_),
-               dim_names, symbol_names),
+               dim_names, range_names, {}),
       MatchIndexingString(kUpdatesIndexing));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(
                    /*root_index=*/1, /*hero_operand_index=*/3, &mlir_context_),
-               dim_names, symbol_names),
+               dim_names, range_names, {}),
       MatchIndexingString(kUpdatesIndexing));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(
                    /*root_index=*/1, /*hero_operand_index=*/4, &mlir_context_),
-               dim_names, symbol_names),
+               dim_names, range_names, {}),
       MatchIndexingString(kUpdatesIndexing));
 
-  symbol_names.push_back("index_id");
+  range_names.push_back("index_id");
   constexpr auto kIndicesIndexing = R"(
     (th_x, th_y, th_z, bl_x, bl_y, bl_z)[chunk_id, unroll_id, index_id] ->
       ((bl_x * 128 + th_x) floordiv 200, 0),
@@ -197,18 +196,17 @@ TEST_F(ScatterFusionTest, ThreadIdIndexing) {
     chunk_id in [0, 0],
     unroll_id in [0, 0],
     index_id in [0, 0],
-    bl_x * 128 + th_x in [0, 8399],
-    is_simplified: true
+    bl_x * 128 + th_x in [0, 8399]
   )";
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(
                    /*root_index=*/0, /*hero_operand_index=*/2, &mlir_context_),
-               dim_names, symbol_names),
+               dim_names, range_names, {}),
       MatchIndexingString(kIndicesIndexing));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(
                    /*root_index=*/1, /*hero_operand_index=*/2, &mlir_context_),
-               dim_names, symbol_names),
+               dim_names, range_names, {}),
       MatchIndexingString(kIndicesIndexing));
 }
 

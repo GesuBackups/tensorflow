@@ -48,8 +48,7 @@ TEST_F(IndexingMapSerializationTest, DimsOnly) {
     (d0, d1) -> (d0 mod 2 + d1),
     domain:
     d0 in [0, 3],
-    d1 in [-4, 4],
-    is_simplified: true
+    d1 in [-4, 4]
   )");
 }
 
@@ -58,8 +57,7 @@ TEST_F(IndexingMapSerializationTest, SymbolsOnly) {
     ()[s0, s1] -> (s0 floordiv s1),
     domain:
     s0 in [0, 3],
-    s1 in [0, 4],
-    is_simplified: true
+    s1 in [0, 4]
   )");
 }
 
@@ -71,8 +69,7 @@ TEST_F(IndexingMapSerializationTest, DimsAndSymbolsNoConstraints) {
     d1 in [0, 4],
     s0 in [0, 1],
     s1 in [0, 1],
-    s2 in [0, 3],
-    is_simplified: false
+    s2 in [0, 3]
   )");
 }
 
@@ -86,8 +83,7 @@ TEST_F(IndexingMapSerializationTest, DimsAndSymbolsAndConstraints) {
     s1 in [0, 1],
     s2 in [0, 3],
     d0 mod 4 in [0, 0],
-    d1 + s0 in [0, 45],
-    is_simplified: false
+    d1 + s0 in [0, 45]
   )");
 }
 
@@ -99,42 +95,23 @@ TEST_F(IndexingMapSerializationTest, AffineExprsWithParens) {
     d0 in [0, 9],
     d1 in [0, 19],
     s0 in [0, 29],
-    s1 in [0, 39],
-    is_simplified: false
+    s1 in [0, 39]
   )");
 }
 
 // This test will be updated when the printing uses types of variables.
 TEST_F(IndexingMapSerializationTest, CustomNames) {
-  auto indexing_map_str = R"(
-    (th_x, bl_x)[vector_elem, reduced_dim, contracted_dim]
-      -> (contracted_dim, th_x + bl_x, reduced_dim, vector_elem),
+  ParseAndCheck(R"(
+    (th_x, bl_x)[s0, vector_elem, s2] -> (s2, th_x + bl_x, vector_elem, s0),
     domain:
     th_x in [0, 3],
     bl_x in [0, 4],
-    vector_elem in [0, 1],
-    reduced_dim in [0, 1],
-    contracted_dim in [0, 3],
-    th_x mod 4 in [0, 0],
-    bl_x + vector_elem in [0, 45],
-    is_simplified: false
-  )";
-  auto indexing_map_golden = R"(
-    (d0, d1)[s0, s1, s2] -> (s2, d0 + d1, s1, s0),
-    domain:
-    d0 in [0, 3],
-    d1 in [0, 4],
     s0 in [0, 1],
-    s1 in [0, 1],
+    vector_elem in [0, 1],
     s2 in [0, 3],
-    d0 mod 4 in [0, 0],
-    d1 + s0 in [0, 45],
-    is_simplified: false
-  )";
-  auto indexing_map = ParseIndexingMap(indexing_map_str, &mlir_context_);
-  ASSERT_TRUE(indexing_map.has_value());
-  EXPECT_THAT(ToString(*indexing_map),
-              MatchIndexingString(indexing_map_golden));
+    bl_x + s0 in [0, 45],
+    th_x mod 4 in [0, 0]
+  )");
 }
 
 TEST_F(IndexingMapSerializationTest, AffineMapPrinterTest) {

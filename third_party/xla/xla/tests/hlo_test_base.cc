@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/tests/hlo_test_base.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <iterator>
@@ -28,20 +29,31 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/debug_options_flags.h"
+#include "xla/error_spec.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_module_group.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/pass/hlo_pass_interface.h"
 #include "xla/hlo/utils/hlo_query.h"
+#include "xla/literal.h"
+#include "xla/service/backend.h"
+#include "xla/service/computation_placer.h"
+#include "xla/service/executable.h"
+#include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_module_util.h"
+#include "xla/service/hlo_runner.h"
 #include "xla/service/hlo_runner_interface.h"
 #include "xla/service/hlo_runner_pjrt.h"
+#include "xla/service/hlo_verifier.h"
 #include "xla/service/platform_util.h"
 #include "xla/shape.h"
 #include "xla/stream_executor/device_memory_allocator.h"
+#include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream_executor_memory_allocator.h"
 #include "xla/tests/filecheck.h"
 #include "xla/tests/literal_test_util.h"
@@ -49,8 +61,10 @@ limitations under the License.
 #include "xla/tests/test_utils.h"
 #include "xla/tests/verified_hlo_module.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
+#include "tsl/platform/status.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/platform/test.h"
 
@@ -459,7 +473,7 @@ absl::StatusOr<std::vector<Literal>> HloTestBase::ExecuteReplicated(
 absl::StatusOr<std::vector<Literal>> HloTestBase::ExecuteReplicated(
     std::unique_ptr<HloModule> module,
     std::vector<std::vector<Literal*>> arguments, int64_t num_replicas,
-    bool run_hlo_passes) {
+    bool run_hlo_passes, DeviceAssignment* device_assignment) {
   CHECK(num_replicas > 0 && "expect at least one replica");
   CHECK(num_replicas == arguments.size() &&
         "expect arguments for each replica");
@@ -475,8 +489,7 @@ absl::StatusOr<std::vector<Literal>> HloTestBase::ExecuteReplicated(
       [&](int64_t replica_idx, int64_t argument_idx) -> const Literal* {
         return arguments[replica_idx][argument_idx];
       },
-      num_replicas, /*run_hlo_passes=*/run_hlo_passes,
-      /*device_assignment=*/nullptr);
+      num_replicas, run_hlo_passes, device_assignment);
 }
 
 absl::StatusOr<std::unique_ptr<HloModule>> HloTestBase::MakeReferenceModule(
@@ -1083,9 +1096,9 @@ HloComputation* HloTestBase::FindComputation(HloModule* module,
 HloInstruction* HloTestBase::FindInstruction(HloModule* module,
                                              absl::string_view name) {
   for (const HloComputation* computation : module->computations()) {
-    if (auto instruction = hlo_query::FindFirstInstruction(computation, name);
-        instruction.first != nullptr) {
-      return instruction.first;
+    if (HloInstruction* instruction =
+            hlo_query::FindInstruction(computation, name)) {
+      return instruction;
     }
   }
   return nullptr;
@@ -1094,9 +1107,9 @@ HloInstruction* HloTestBase::FindInstruction(HloModule* module,
 HloInstruction* HloTestBase::FindInstruction(HloModule* module,
                                              HloOpcode opcode) {
   for (const HloComputation* computation : module->computations()) {
-    if (auto instruction = hlo_query::FindFirstInstruction(computation, opcode);
-        instruction.first != nullptr) {
-      return instruction.first;
+    if (HloInstruction* instruction =
+            hlo_query::FindInstruction(computation, opcode)) {
+      return instruction;
     }
   }
   return nullptr;

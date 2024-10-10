@@ -80,44 +80,42 @@ TEST_F(TransposeTest, ThreadIndexing021) {
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(0, 0, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
-          d3 floordiv 2,
-          d0 floordiv 32 + s1 * 4,
-          (d3 mod 2) * 32 + d0 mod 32
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
+          bl_x floordiv 2,
+          th_x floordiv 32 + s1 * 4,
+          (bl_x mod 2) * 32 + th_x mod 32
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 199],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 199],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
 
         s0 in [0, 0],
         s1 in [0, 7],
-        s2 in [0, 0],
-        is_simplified: true
+        s2 in [0, 0]
       )"));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToOutputIndexing(0, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
-          d3 floordiv 2,
-          (d3 mod 2) * 32 + s1 * 4 + d0 floordiv 32,
-          d0 mod 32
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
+          bl_x floordiv 2,
+          (bl_x mod 2) * 32 + s1 * 4 + th_x floordiv 32,
+          th_x mod 32
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 199],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 199],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
 
         s0 in [0, 0],
         s1 in [0, 7],
-        s2 in [0, 0],
-        is_simplified: true
+        s2 in [0, 0]
       )"));
 }
 
@@ -144,44 +142,42 @@ TEST_F(TransposeTest, ThreadIndexing201_SimplifiedTo021) {
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(0, 0, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
           0,
-          d3  * 32 + s1 * 4 + d0 floordiv 32,
-          d0 mod 32
+          bl_x  * 32 + s1 * 4 + th_x floordiv 32,
+          th_x mod 32
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 199],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 199],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
 
         s0 in [0, 0],
         s1 in [0, 7],
-        s2 in [0, 0],
-        is_simplified: true
+        s2 in [0, 0]
       )"));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToOutputIndexing(0, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
           0,
-          d0 floordiv 32 + s1 * 4,
-          d3 * 32 + d0 mod 32
+          th_x floordiv 32 + s1 * 4,
+          bl_x * 32 + th_x mod 32
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 199],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 199],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
 
         s0 in [0, 0],
         s1 in [0, 7],
-        s2 in [0, 0],
-        is_simplified: true
+        s2 in [0, 0]
       )"));
 }
 
@@ -210,44 +206,42 @@ TEST_F(TransposeTest, ThreadIndexingPartialBlock) {
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(0, 0, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
-          d0 floordiv 32 + s0 * 4,
-          d3,
-          d0 mod 32
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
+          th_x floordiv 32 + s0 * 4,
+          bl_x,
+          th_x mod 32
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 1],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 1],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
         s0 in [0, 5],
         s1 in [0, 0],
         s2 in [0, 0],
-        d0 mod 32 in [0, 23],
-        is_simplified: true
+        th_x mod 32 in [0, 23]
       )"));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToOutputIndexing(0, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
-          d0 floordiv 32 + s0 * 4,
-          d3,
-          d0 mod 32
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
+          th_x floordiv 32 + s0 * 4,
+          bl_x,
+          th_x mod 32
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 1],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 1],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
         s0 in [0, 5],
         s1 in [0, 0],
         s2 in [0, 0],
-        d0 mod 32 in [0, 23],
-        is_simplified: true
+        th_x mod 32 in [0, 23]
       )"));
 }
 
@@ -308,43 +302,41 @@ TEST_F(TransposeTest, ThreadIndexingSideOutput) {
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToInputIndexing(1, 0, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
-          d3 floordiv 2,
-          d0 floordiv 32 + s1 * 4
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
+          bl_x floordiv 2,
+          th_x floordiv 32 + s1 * 4
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 199],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 199],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
 
         s0 in [0, 0],
         s1 in [0, 7],
-        s2 in [0, 0],
-        is_simplified: true
+        s2 in [0, 0]
       )"));
   EXPECT_THAT(
       ToString(*fusion->ComputeThreadIdToOutputIndexing(1, &mlir_context)),
       MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
-          d3 floordiv 2,
-          d0 floordiv 32 + s1 * 4,
-          (d3 mod 2) * 32 + d0 mod 32
+        (th_x, th_y, th_z, bl_x, bl_y, bl_z)[s0, s1, s2] -> (
+          bl_x floordiv 2,
+          th_x floordiv 32 + s1 * 4,
+          (bl_x mod 2) * 32 + th_x mod 32
         ),
         domain:
-        d0 in [0, 127],
-        d1 in [0, 0],
-        d2 in [0, 0],
-        d3 in [0, 199],
-        d4 in [0, 0],
-        d5 in [0, 0],
+        th_x in [0, 127],
+        th_y in [0, 0],
+        th_z in [0, 0],
+        bl_x in [0, 199],
+        bl_y in [0, 0],
+        bl_z in [0, 0],
 
         s0 in [0, 0],
         s1 in [0, 7],
-        s2 in [0, 0],
-        is_simplified: true
+        s2 in [0, 0]
       )"));
 }
 

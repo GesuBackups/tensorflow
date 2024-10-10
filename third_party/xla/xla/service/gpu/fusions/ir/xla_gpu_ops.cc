@@ -141,8 +141,8 @@ void ApplyIndexingOp::build(OpBuilder& builder, OperationState& result,
 
 void ApplyIndexingOp::build(OpBuilder& builder, OperationState& result,
                             ValueRange operands, AffineMap affine_map,
-                            ArrayRef<DimVar> dim_vars,
-                            ArrayRef<RangeVar> range_vars) {
+                            ArrayRef<IndexingMap::Variable> dim_vars,
+                            ArrayRef<IndexingMap::Variable> range_vars) {
   IndexingMap indexing_map(affine_map, dim_vars, range_vars, {});
   build(builder, result, operands, indexing_map);
 }
@@ -183,13 +183,13 @@ ParseResult ApplyIndexingOp::parse(OpAsmParser& parser,
       parser.parseOptionalAttrDict(result.attributes)) {
     return failure();
   }
-  auto map = indexing_map_attr.getMap();
+  auto map = indexing_map_attr.getIndexingMap().GetAffineMap();
   result.addTypes(SmallVector<Type, 2>(map.getNumResults(), index_type));
   return success();
 }
 
 void ApplyIndexingOp::print(OpAsmPrinter& p) {
-  AffineMap affine_map = getIndexingMapAttr().getMap();
+  AffineMap affine_map = getIndexingMapAttr().getIndexingMap().GetAffineMap();
   p << " " << getIndexingMapAttr();
 
   auto operands = getOperands();
@@ -214,14 +214,14 @@ void ApplyIndexingOp::print(OpAsmPrinter& p) {
 }
 
 LogicalResult ApplyIndexingOp::verify() {
-  auto affine_map = getIndexingMapAttr().getMap();
+  auto affine_map = getIndexingMapAttr().getIndexingMap().GetAffineMap();
   unsigned num_variables = affine_map.getNumDims() + affine_map.getNumSymbols();
   if (getOperands().size() != num_variables) {
     return emitOpError(
         "operand count must match the number of dimensions and symbols in the "
         "affine map");
   }
-  if (!getIndexingMapAttr().getConstraints().empty()) {
+  if (!getIndexingMap().GetConstraints().empty()) {
     return emitOpError("apply indexing op cannot have any constraints");
   }
   return success();
@@ -310,11 +310,10 @@ struct SimplifyIndexingMap : public mlir::OpRewritePattern<ApplyIndexingOp> {
   LogicalResult matchAndRewrite(ApplyIndexingOp indexing_op,
                                 PatternRewriter& rewriter) const override {
     IndexingMap indexing_map = indexing_op.getIndexingMap();
-    if (indexing_map.IsSimplified()) {
+    if (!indexing_map.Simplify()) {
       return rewriter.notifyMatchFailure(indexing_op,
                                          "IndexingMap is already simplified");
     }
-    indexing_map.Simplify();
     rewriter.replaceOpWithNewOp<ApplyIndexingOp>(
         indexing_op, indexing_op.getOperands(), indexing_map);
     return success();
@@ -466,9 +465,9 @@ struct FoldApplyIndexingOperands
     unsigned new_num_operands = indexing_op->getNumOperands() - num_constants;
     SmallVector<Value, 4> new_operands;
     new_operands.reserve(new_num_operands);
-    SmallVector<DimVar, 2> new_dim_vars;
+    SmallVector<IndexingMap::Variable, 2> new_dim_vars;
     new_dim_vars.reserve(num_dims);
-    SmallVector<RangeVar, 2> new_range_vars;
+    SmallVector<IndexingMap::Variable, 2> new_range_vars;
     new_range_vars.reserve(num_symbols);
 
     unsigned new_num_dims = 0;
@@ -981,7 +980,7 @@ LogicalResult MaterializeOp::verify() {
     return emitOpError()
            << "must have thread_id dimension in both indexing maps";
   }
-  if (map_in.GetDimVars(0) != map_out.GetDimVars(0)) {
+  if (map_in.GetDimVars(0).bounds != map_out.GetDimVars(0).bounds) {
     return emitOpError() << "thread_id dimension must have the same bounds in "
                             "both indexing maps";
   }
@@ -1001,7 +1000,7 @@ LogicalResult MaterializeOp::verify() {
   }
   for (auto const& [range_in, range_out] :
        llvm::zip(map_in.GetRangeVars(), map_out.GetRangeVars())) {
-    if (range_in.range != range_out.range) {
+    if (range_in.bounds != range_out.bounds) {
       return emitOpError() << "domain of symbols of indexing_maps must match";
     }
   }
@@ -1046,12 +1045,12 @@ LogicalResult MaterializeOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult InsertOp::verify() {
-  if (!getMap().getRangeVars().empty()) {
+  if (!getMap().getIndexingMap().GetRangeVars().empty()) {
     return emitOpError() << "insert_op map must not have any symbols";
   }
   int64_t vector_map_num_results =
       getSource().getType().getIndexingMapAttr().getNumResults();
-  if (vector_map_num_results != getMap().getDimVars().size()) {
+  if (vector_map_num_results != getMap().getIndexingMap().GetDimVars().size()) {
     return emitOpError() << "source map result count must equal insert_op's "
                             "map's dimension count";
   }
