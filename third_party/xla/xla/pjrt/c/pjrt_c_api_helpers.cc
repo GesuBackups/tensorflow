@@ -37,10 +37,12 @@ limitations under the License.
 #include "xla/layout.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_layouts_extension.h"
+#include "xla/pjrt/c/pjrt_c_api_memory_descriptions_extension.h"
 #include "xla/pjrt/c/pjrt_c_api_profiler_extension.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_common.h"
+#include "xla/pjrt/pjrt_device_description.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_future.h"
 #include "xla/primitive_util.h"
@@ -308,6 +310,8 @@ PJRT_Buffer_Type ConvertToPjRtBufferType(xla::PrimitiveType type) {
       return PJRT_Buffer_Type::PJRT_Buffer_Type_BF16;
     case xla::PrimitiveType::F64:
       return PJRT_Buffer_Type::PJRT_Buffer_Type_F64;
+    case xla::PrimitiveType::F4E2M1FN:
+      return PJRT_Buffer_Type::PJRT_Buffer_Type_F4E2M1FN;
     case xla::PrimitiveType::F8E5M2:
       return PJRT_Buffer_Type::PJRT_Buffer_Type_F8E5M2;
     case xla::PrimitiveType::F8E4M3:
@@ -322,6 +326,8 @@ PJRT_Buffer_Type ConvertToPjRtBufferType(xla::PrimitiveType type) {
       return PJRT_Buffer_Type::PJRT_Buffer_Type_F8E4M3FNUZ;
     case xla::PrimitiveType::F8E3M4:
       return PJRT_Buffer_Type::PJRT_Buffer_Type_F8E3M4;
+    case xla::PrimitiveType::F8E8M0FNU:
+      return PJRT_Buffer_Type::PJRT_Buffer_Type_F8E8M0FNU;
     case xla::PrimitiveType::C64:
       return PJRT_Buffer_Type::PJRT_Buffer_Type_C64;
     case xla::PrimitiveType::C128:
@@ -375,6 +381,8 @@ xla::PrimitiveType ConvertFromPjRtBufferType(PJRT_Buffer_Type type) {
       return xla::PrimitiveType::C64;
     case PJRT_Buffer_Type::PJRT_Buffer_Type_C128:
       return xla::PrimitiveType::C128;
+    case PJRT_Buffer_Type::PJRT_Buffer_Type_F4E2M1FN:
+      return xla::PrimitiveType::F4E2M1FN;
     case PJRT_Buffer_Type::PJRT_Buffer_Type_F8E5M2:
       return xla::PrimitiveType::F8E5M2;
     case PJRT_Buffer_Type::PJRT_Buffer_Type_F8E4M3:
@@ -389,6 +397,8 @@ xla::PrimitiveType ConvertFromPjRtBufferType(PJRT_Buffer_Type type) {
       return xla::PrimitiveType::F8E4M3FNUZ;
     case PJRT_Buffer_Type::PJRT_Buffer_Type_F8E3M4:
       return xla::PrimitiveType::F8E3M4;
+    case PJRT_Buffer_Type::PJRT_Buffer_Type_F8E8M0FNU:
+      return xla::PrimitiveType::F8E8M0FNU;
     case PJRT_Buffer_Type::PJRT_Buffer_Type_INVALID:
       CHECK(false) << "Buffer type is not supported in C API layer.";
   }
@@ -1099,6 +1109,37 @@ xla::PjRtClient::ShapeSpec ConvertFromPjrtShapeSpec(
   shape_spec.dims = xla::DimensionVector(
       c_shape_spec.dims, c_shape_spec.dims + c_shape_spec.num_dims);
   return shape_spec;
+}
+
+std::vector<xla::PjRtMemorySpaceDescription> GetMemorySpaceDescriptions(
+    PJRT_DeviceDescription* device_description, const PJRT_Api* c_api) {
+  const PJRT_MemoryDescriptions_Extension* extension =
+      pjrt::FindExtension<PJRT_MemoryDescriptions_Extension>(
+          c_api, PJRT_Extension_Type::PJRT_Extension_Type_MemoryDescriptions);
+  if (!extension) return {};
+
+  PJRT_DeviceDescription_MemoryDescriptions_Args mem_desc_args;
+  mem_desc_args.struct_size =
+      PJRT_DeviceDescription_MemoryDescriptions_Args_STRUCT_SIZE;
+  mem_desc_args.extension_start = nullptr;
+  mem_desc_args.device_description = device_description;
+  pjrt::LogFatalIfPjrtError(
+      extension->PJRT_DeviceDescription_MemoryDescriptions(&mem_desc_args),
+      c_api);
+
+  std::vector<xla::PjRtMemorySpaceDescription> memory_space_descriptions;
+  for (int i = 0; i < mem_desc_args.num_memory_descriptions; i++) {
+    PJRT_MemoryDescription_Kind_Args kind_args;
+    kind_args.struct_size = PJRT_MemoryDescription_Kind_Args_STRUCT_SIZE;
+    kind_args.extension_start = nullptr;
+    kind_args.memory_description = mem_desc_args.memory_descriptions[i];
+    pjrt::LogFatalIfPjrtError(
+        extension->PJRT_MemoryDescription_Kind(&kind_args), c_api);
+    xla::PjRtMemorySpaceDescription description(
+        std::string(kind_args.kind, kind_args.kind_size), kind_args.kind_id);
+    memory_space_descriptions.push_back(description);
+  }
+  return memory_space_descriptions;
 }
 
 }  // namespace pjrt
