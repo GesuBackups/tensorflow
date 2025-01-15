@@ -38,11 +38,11 @@ limitations under the License.
 #include "xla/comparison_util.h"
 #include "xla/fp_util.h"
 #include "xla/hlo/builder/xla_builder.h"
+#include "xla/hlo/testlib/test.h"
 #include "xla/layout_util.h"
 #include "xla/literal.h"
 #include "xla/primitive_util.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/test.h"
 #include "xla/tests/client_library_test_base.h"
 #include "xla/tests/test_macros.h"
 #include "xla/types.h"
@@ -86,6 +86,20 @@ std::pair<std::vector<T>, std::vector<T>> AllSignedPairs(
     }
   }
   return {xs, ys};
+}
+
+template <typename T>
+void AddNegativeValuesMaybeRemoveZero(std::vector<T>& values) {
+  values.reserve(values.size() * 2);
+  if (!has_zero_v<T>) {
+    values.erase(values.begin());
+  }
+  for (size_t i = 0, n = values.size(); i < n; ++i) {
+    auto neg = -values[i];
+    if (SignAndMagnitude(neg).first) {
+      values.push_back(neg);
+    }
+  }
 }
 
 class ArrayElementwiseOpTest : public ClientLibraryTestBase {
@@ -1366,14 +1380,7 @@ class TotalOrderTest : public ClientLibraryTestBase {
       values.push_back(Eigen::numext::abs(std::numeric_limits<T>::quiet_NaN()));
     }
 #endif
-    values.reserve(values.size() * 2);
-    for (size_t i = 0, n = values.size(); i < n; ++i) {
-      auto value = values[i];
-      auto neg = -value;
-      if (Eigen::numext::signbit(neg) != Eigen::numext::signbit(value)) {
-        values.push_back(neg);
-      }
-    }
+    AddNegativeValuesMaybeRemoveZero(values);
     std::vector<T> lhs_data;
     std::vector<T> rhs_data;
     lhs_data.reserve(values.size() * values.size());
@@ -1418,19 +1425,24 @@ class TotalOrderTest : public ClientLibraryTestBase {
   }
 };
 
-using Types = ::testing::Types<tsl::float8_e3m4, tsl::float8_e4m3,
-                               tsl::float8_e4m3fnuz, tsl::float8_e4m3b11fnuz,
-                               tsl::float8_e5m2, tsl::float8_e5m2fnuz,
+using Types =
+    ::testing::Types<tsl::float8_e3m4, tsl::float8_e4m3, tsl::float8_e4m3fn,
+                     tsl::float8_e4m3fnuz, tsl::float8_e4m3b11fnuz,
+                     tsl::float8_e5m2, tsl::float8_e5m2fnuz,
 #if !defined(XLA_BACKEND_DOES_NOT_SUPPORT_FLOAT16)
-                               Eigen::half,
+                     Eigen::half,
 #endif
 #if !defined(XLA_BACKEND_DOES_NOT_SUPPORT_BFLOAT16)
-                               Eigen::bfloat16,
+                     Eigen::bfloat16,
 #endif
 #if !defined(XLA_BACKEND_DOES_NOT_SUPPORT_FLOAT64)
-                               double,
+                     double,
 #endif
-                               float>;
+#if !defined(XLA_TEST_BACKEND_TPU)
+                     // TODO(b/385004399): Run tests on these types on TPU.
+                     tsl::float4_e2m1fn, tsl::float8_e8m0fnu,
+#endif
+                     float>;
 
 TYPED_TEST_SUITE(TotalOrderTest, Types);
 
@@ -1457,13 +1469,7 @@ TYPED_TEST(TotalOrderTest, LargeMagnitudeVsNaN) {
   if constexpr (std::numeric_limits<T>::has_infinity) {
     values.push_back(std::numeric_limits<T>::infinity());
   }
-  for (size_t i = 0, n = values.size(); i < n; ++i) {
-    auto value = values[i];
-    auto neg = -value;
-    if (Eigen::numext::signbit(neg) != Eigen::numext::signbit(value)) {
-      values.push_back(neg);
-    }
-  }
+  AddNegativeValuesMaybeRemoveZero(values);
   auto lhs = ConstantR1<T>(&builder, values);
   auto rhs = ConstantR1<T>(
       &builder,

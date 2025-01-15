@@ -764,3 +764,63 @@ func.func @for_op(%arg0: tensor<500xf32>) -> f32 {
 // CHECK-LABEL: @for_op
 // CHECK:  scf.for {{.*}} -> (vector<4xf32>) {
 // CHECK-NEXT:  scf.for {{.*}} -> (vector<4xf32>) {
+
+// -----
+
+func.func @vector_atomic_rmw(%arg0: tensor<4xf32>) -> tensor<4xf32> {
+  %c0 = arith.constant 0 : index
+  %cst = arith.constant 4.200000e+01 : f32
+  %cst_42 = arith.constant dense<42.000000e+00> : vector<4xf32>
+  %atomic_rmw = xla.atomic_rmw %arg0[%c0] : tensor<4xf32> {
+  ^bb0(%arg1: vector<4xf32>):
+    %1 = arith.addf %arg1, %cst_42 : vector<4xf32>
+    xla.yield %1 : vector<4xf32>
+  }
+  return %atomic_rmw : tensor<4xf32>
+}
+
+// CHECK-HOPPER-LABEL:  @direct_atomic_rmw_fadd_f64
+// CHECK-HOPPER-SAME:     %[[ADDR:.*]]: !llvm.ptr
+// CHECK-HOPPER:          llvm.atomicrmw fadd {{.*}} !llvm.ptr, f32
+// CHECK-HOPPER:          llvm.atomicrmw fadd {{.*}} !llvm.ptr, f32
+// CHECK-HOPPER:          llvm.atomicrmw fadd {{.*}} !llvm.ptr, f32
+// CHECK-HOPPER:          llvm.atomicrmw fadd {{.*}} !llvm.ptr, f32
+
+// -----
+
+func.func @f4_constant(%arg0: tensor<3xf4E2M1FN>, %arg1: index) -> f4E2M1FN {
+  %cst = arith.constant dense<[0.5, -0.5, 2.5]> : tensor<3xf4E2M1FN>
+  %extracted = tensor.extract %arg0[%arg1] : tensor<3xf4E2M1FN>
+  %extracted_0 = tensor.extract %cst[%arg1] : tensor<3xf4E2M1FN>
+  %0 = arith.addf %extracted, %extracted_0 : f4E2M1FN
+  return %0 : f4E2M1FN
+}
+// CHECK: llvm.mlir.global private constant
+// CHECK-SAME: dense<[25, 64]>
+// CHECK-LABEL: @f4_constant
+
+// -----
+
+func.func @transfer_read_f4(%arg0: tensor<43xf4E2M1FN> {xla.slice_index = 1}) -> vector<2xf4E2M1FN> {
+  %c16 = arith.constant 16 : index
+  %c0 = arith.constant 0.0 : f4E2M1FN
+  %out = vector.transfer_read %arg0[%c16], %c0 : tensor<43xf4E2M1FN>, vector<2xf4E2M1FN>
+  func.return %out : vector<2xf4E2M1FN>
+}
+// CHECK-LABEL: @transfer_read_f4
+// CHECK: %[[PTR:.*]] = llvm.getelementptr inbounds %{{.*}}[8]
+// CHECK: llvm.load %[[PTR]] : !llvm.ptr -> vector<2xi4>
+// CHECK: %[[OUT:.*]] = builtin.unrealized_conversion_cast %{{.*}} : vector<2xi4> to vector<2xf4E2M1FN>
+// CHECK: return %[[OUT]] : vector<2xf4E2M1FN>
+
+// -----
+
+func.func @transfer_write_f4(%arg0: tensor<43xf4E2M1FN> {xla.slice_index = 1},
+                             %arg1: vector<2xf4E2M1FN>) -> tensor<43xf4E2M1FN> {
+  %c10 = arith.constant 10 : index
+  %out = vector.transfer_write %arg1, %arg0[%c10] : vector<2xf4E2M1FN>, tensor<43xf4E2M1FN>
+  func.return %out : tensor<43xf4E2M1FN>
+}
+// CHECK-LABEL: @transfer_write_f4
+// CHECK: %[[PTR:.*]] = llvm.getelementptr inbounds %arg0[5] : (!llvm.ptr) -> !llvm.ptr, i8
+// CHECK: %[[OUT:.*]] = builtin.unrealized_conversion_cast %{{.*}} : vector<2xf4E2M1FN> to vector<2xi4>

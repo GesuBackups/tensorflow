@@ -298,15 +298,6 @@ struct UnrollLoops : mlir::OpRewritePattern<mlir::scf::ForOp> {
 
   mlir::LogicalResult matchAndRewrite(
       mlir::scf::ForOp op, mlir::PatternRewriter& rewriter) const override {
-    for (mlir::Value yielded_value :
-         op.getBody()->getTerminator()->getOperands()) {
-      if (yielded_value.getParentRegion() != &op.getBodyRegion()) {
-        // TODO(b/385081592): loopUnrollByFactor fails if it sees a yield of a
-        // value defined out of the loop. It can be fixed upstream.
-        return rewriter.notifyMatchFailure(
-            op, "loop yields values defined outside of the loop");
-      }
-    }
     if (int factor = GetUnrollingFactor(op); factor > 1) {
       return mlir::loopUnrollByFactor(op, factor);
     }
@@ -321,8 +312,8 @@ class OptimizeLoopsPass
     // First unroll loops. If unrolling is possible, we prefer it.
     mlir::RewritePatternSet unroll_patterns(&getContext());
     unroll_patterns.add<UnrollLoops>(&getContext());
-    if (mlir::failed(mlir::applyPatternsAndFoldGreedily(
-            getOperation(), std::move(unroll_patterns)))) {
+    if (mlir::failed(mlir::applyPatternsGreedily(getOperation(),
+                                                 std::move(unroll_patterns)))) {
       signalPassFailure();
       return;
     }
@@ -331,8 +322,8 @@ class OptimizeLoopsPass
     mlir::RewritePatternSet patterns(&getContext());
     patterns.add<PipelineLoad<mlir::vector::TransferReadOp>,
                  PipelineLoad<mlir::tensor::ExtractOp>>(&getContext());
-    if (mlir::failed(mlir::applyPatternsAndFoldGreedily(getOperation(),
-                                                        std::move(patterns)))) {
+    if (mlir::failed(
+            mlir::applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
   }
