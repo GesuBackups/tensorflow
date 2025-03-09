@@ -43,6 +43,7 @@ default_visibility = [
     #internal nexus library,
     #internal nexus library tests,
     "//tensorflow/compiler/jit:__subpackages__",
+    #internal library,
 ]
 
 package(
@@ -889,6 +890,8 @@ tf_cuda_library(
         "//tensorflow/core/platform:tensor_coding",
         "//tensorflow/core/platform:types",
         "//tensorflow/core/public:version",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/numeric:bits",
         "@com_google_absl//absl/strings",
@@ -1701,6 +1704,7 @@ tf_proto_library(
         ":types_proto",
     ],
     visibility = [
+        #internal library,
         "//tensorflow/core:__subpackages__",
         "//tensorflow/python:__pkg__",
         "//tensorflow/python/profiler/internal:__pkg__",
