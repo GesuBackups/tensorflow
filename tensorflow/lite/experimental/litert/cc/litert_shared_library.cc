@@ -14,7 +14,10 @@
 
 #include "tensorflow/lite/experimental/litert/cc/litert_shared_library.h"
 
+#if !LITERT_WINDOWS_OS
 #include <dlfcn.h>
+#endif
+
 #if defined(_GNU_SOURCE) && !defined(__ANDROID__) && !defined(__APPLE__)
 #define LITERT_IMPLEMENT_SHARED_LIBRARY_INFO 1
 #include <link.h>
@@ -27,7 +30,59 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "tensorflow/lite/experimental/litert/c/litert_common.h"
+#include "tensorflow/lite/experimental/litert/c/litert_logging.h"  // IWYU pragma: keep
 #include "tensorflow/lite/experimental/litert/cc/litert_expected.h"
+
+// When using an address sanitizer, `RTLD_DEEPBIND` is not supported. When using
+// one, we discard the flag and log an error.
+#if defined(__SANITIZE_ADDRESS__) || \
+    defined(__has_feature) &&        \
+        (__has_feature(address_sanitizer) || __has_feature(memory_sanitizer))
+#define LITERT_SANITIZER_BUILD 1
+#endif
+
+#if LITERT_SANITIZER_BUILD
+namespace litert {
+namespace {
+RtldFlags SanitizeFlagsInCaseOfAsan(RtldFlags flags) {
+  LITERT_LOG(
+      LITERT_WARNING,
+      "Trying to load a library using `RTLD_DEEPBIND` is not supported by "
+      "address sanitizers. In an effort to enable testing we strip the flag. "
+      "If this leads to unintended behaviour, either remove the "
+      "`RTLD_DEEPBIND` flag or run without an address sanitizer. "
+      "See https://github.com/google/sanitizers/issues/611 for more "
+      "information.");
+  flags.flags &= ~RTLD_DEEPBIND;
+  return flags;
+}
+}  // namespace
+}  // namespace litert
+#else
+#define SanitizeFlagsInCaseOfAsan(flags) (flags)
+#endif
+
+#if LITERT_WINDOWS_OS
+// Implement dummy functions from dlfnc.h on Windows.
+namespace {
+
+const char* dlerror() {
+  return "Windows is not supported for loading shared libraries.";
+}
+
+void* dlopen(const char*, int) { return NULL; }
+
+void dlclose(void*) {}
+
+void* dlsym(void*, const char*) { return NULL; }
+
+int dlinfo(void*, int, void*) { return -1; }
+
+#define RTLD_NEXT (void*)-1;
+#define RTLD_DEFAULT (void*)0;
+
+}  // namespace
+#endif
 
 namespace litert {
 
@@ -82,7 +137,8 @@ Expected<SharedLibrary> SharedLibrary::LoadImpl(
                      "Cannot not load shared library: empty path.");
       }
       lib.path_ = path;
-      lib.handle_ = dlopen(lib.Path().c_str(), flags);
+      lib.handle_ =
+          dlopen(lib.Path().c_str(), SanitizeFlagsInCaseOfAsan(flags));
       if (!lib.handle_) {
         return Error(kLiteRtStatusErrorDynamicLoading,
                      absl::StrFormat("Could not load shared library %s: %s.",
@@ -102,6 +158,7 @@ Expected<SharedLibrary> SharedLibrary::LoadImpl(
 
 Expected<void*> SharedLibrary::LookupSymbolImpl(const char* symbol_name) const {
   void* symbol = dlsym(handle_, symbol_name);
+
   if (!symbol) {
     return Error(kLiteRtStatusErrorDynamicLoading,
                  absl::StrFormat("Could not load symbol %s: %s.", symbol_name,
@@ -120,13 +177,17 @@ std::ostream& operator<<(std::ostream& os, const SharedLibrary& lib) {
   }
 
   os << kHeader;
-#if LITERT_IMPLEMENT_SHARED_LIBRARY_INFO
+#ifdef RTLD_DI_LMID
   if (Lmid_t dl_ns_idx; dlinfo(lib.handle_, RTLD_DI_LMID, &dl_ns_idx) != 0) {
     os << "Error getting lib namespace index: " << dlerror() << ".\n";
   } else {
     os << "LIB NAMESPACE INDEX: " << dl_ns_idx << "\n";
   }
+#else
+  os << "Cannot retrieve namespace index on this platform.\n";
+#endif
 
+#ifdef RTLD_DI_LINKMAP
   if (link_map* lm; dlinfo(lib.handle_, RTLD_DI_LINKMAP, &lm) != 0) {
     os << "Error getting linked objects: " << dlerror() << ".\n";
   } else {
@@ -142,7 +203,7 @@ std::ostream& operator<<(std::ostream& os, const SharedLibrary& lib) {
     }
   }
 #else
-  os << "Unsupported platform.\n";
+  os << "Cannot retrieve lib map on this platform.\n";
 #endif
   return os << kFooter;
 }

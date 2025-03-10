@@ -199,6 +199,7 @@ cc_library(
         "//xla/tsl/platform:status",
         "//xla/tsl/platform:statusor",
         "//xla/tsl/platform:test",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -1819,6 +1820,7 @@ xla_test(
         "//xla/hlo/testlib:test",
         "//xla/hlo/testlib:test_helpers",
         "@com_google_absl//absl/status:statusor",
+        "@eigen_archive//:eigen3",
     ],
 )
 
@@ -3673,7 +3675,7 @@ xla_test(
 bzl_library(
     name = "plugin_bzl",
     srcs = ["plugin.bzl"],
-    deps = [],
+    deps = ["//xla/tsl:package_groups_bzl"],
 )
 
 bzl_library(
@@ -3683,6 +3685,7 @@ bzl_library(
         ":plugin_bzl",
         "//xla:xla_bzl",
         "//xla/stream_executor:build_defs_bzl",
+        "//xla/tsl:package_groups_bzl",
         "//xla/tsl/platform:build_config_root_bzl",
         "//xla/tsl/platform/default:build_config_bzl",
     ] + tests_build_defs_bzl_deps(),
