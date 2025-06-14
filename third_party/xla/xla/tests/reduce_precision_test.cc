@@ -16,6 +16,7 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
+#include "xla/tests/xla_test_backend_predicates.h"
 #include "absl/base/casts.h"
 #include "absl/strings/str_format.h"
 #include "xla/hlo/builder/xla_builder.h"
@@ -25,7 +26,6 @@ limitations under the License.
 #include "xla/tests/client_library_test_runner_mixin.h"
 #include "xla/tests/hlo_pjrt_interpreter_reference_mixin.h"
 #include "xla/tests/hlo_pjrt_test_base.h"
-#include "xla/tests/test_macros.h"
 #include "xla/tsl/platform/test.h"
 #include "xla/types.h"
 
@@ -479,7 +479,10 @@ TEST_P(ReducedPrecisionAccuracyTest, ReducePrecisionFloat) {
                         operation_index);
 }
 
-TEST_P(ReducedPrecisionAccuracyTest, DISABLED_ON_TPU(ReducePrecisionDouble)) {
+TEST_P(ReducedPrecisionAccuracyTest, ReducePrecisionDouble) {
+  if (test::DeviceTypeIs(test::kTpu)) {
+    GTEST_SKIP();
+  }
   int operation_index = GetParam();
   DoIt<double, uint64_t>(f64_exponent_sizes[operation_index],
                          f64_mantissa_sizes[operation_index], f64_test_values,

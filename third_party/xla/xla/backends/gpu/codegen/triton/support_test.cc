@@ -331,6 +331,59 @@ INSTANTIATE_TEST_SUITE_P(
     AllTestCombinationsForOpcodes(kTestedOpsBitcastReshape),
     TritonSupportTestTypeAndOpcodeAndDeviceToString);
 
+using PadTest = TritonSupportTestWithTypeAndOpcodeAndDeviceParam;
+
+TEST_P(PadTest, IsTritonSupportedHighPad) {
+  auto [data_type, opcode, cc] = GetParam();
+  const std::string kHloTestTemplate = R"(
+ENTRY triton_computation {
+  p0 = $0[4, 4] parameter(0)
+  p1 = $0[] parameter(1)
+  ROOT pad = $0[32, 16] $1(p0, p1), padding=0_28_0x0_12_0
+})";
+  TF_ASSERT_OK_AND_ASSIGN(
+      TestedInstruction ti,
+      ParseTemplateAndGetInstruction(kHloTestTemplate, data_type, opcode,
+                                     /*use_nested_gemm_fusions=*/true));
+  RunSupportTest(std::move(ti), /*output_tile_sizes=*/{4, 4}, cc);
+}
+
+TEST_P(PadTest, IsTritonSupportedInteriorPad) {
+  auto [data_type, opcode, cc] = GetParam();
+  const std::string kHloTestTemplate = R"(
+ENTRY triton_computation {
+  p0 = $0[4] parameter(0)
+  p1 = $0[] parameter(1)
+  ROOT pad = $0[7] $1(p0, p1), padding=0_0_1
+})";
+  TF_ASSERT_OK_AND_ASSIGN(
+      TestedInstruction ti,
+      ParseTemplateAndGetInstruction(kHloTestTemplate, data_type, opcode,
+                                     /*use_nested_gemm_fusions=*/true));
+  RunSupportTest(std::move(ti), /*output_tile_sizes=*/{4}, cc);
+}
+
+TEST_P(PadTest, IsTritonSupportedLowPad) {
+  auto [data_type, opcode, cc] = GetParam();
+  const std::string kHloTestTemplate = R"(
+ENTRY triton_computation {
+  p0 = $0[4] parameter(0)
+  p1 = $0[] parameter(1)
+  ROOT pad = $0[8] $1(p0, p1), padding=4_0_0
+})";
+  TF_ASSERT_OK_AND_ASSIGN(
+      TestedInstruction ti,
+      ParseTemplateAndGetInstruction(kHloTestTemplate, data_type, opcode,
+                                     /*use_nested_gemm_fusions=*/true));
+  RunSupportTest(std::move(ti), /*output_tile_sizes=*/{4}, cc);
+}
+
+constexpr std::array kTestedOpsPad = {HloOpcode::kPad};
+
+INSTANTIATE_TEST_SUITE_P(PadTestSuite, PadTest,
+                         AllTestCombinationsForOpcodes(kTestedOpsPad),
+                         TritonSupportTestTypeAndOpcodeAndDeviceToString);
+
 using UnaryElementwiseTest = TritonSupportTestWithTypeAndOpcodeAndDeviceParam;
 
 TEST_P(UnaryElementwiseTest, IsTritonSupportedUnaryElementwise) {
@@ -3288,10 +3341,8 @@ constexpr std::array kUnsupportedOps = {
     // clang-format off
     // go/keep-sorted start
     HloOpcode::kDynamicReshape,
-    HloOpcode::kDynamicSlice,
     HloOpcode::kDynamicUpdateSlice,
     HloOpcode::kGather,
-    HloOpcode::kPad,
     HloOpcode::kRaggedDot,
     HloOpcode::kReduceWindow,
     HloOpcode::kScatter,
@@ -3321,13 +3372,15 @@ absl::flat_hash_set<HloOpcode> AllTestedOpcodes() {
   ret.insert(kTestedOpsParameter.begin(), kTestedOpsParameter.end());
   ret.insert(kTestedOpsConstant.begin(), kTestedOpsConstant.end());
   ret.insert(kTestedOpsIota.begin(), kTestedOpsIota.end());
+  ret.insert(kTestedOpsPad.begin(), kTestedOpsPad.end());
   ret.insert(kTestedOpsRng.begin(), kTestedOpsRng.end());
   ret.insert(kTestedOpsCopy.begin(), kTestedOpsCopy.end());
   ret.insert(kTestedOpsRecv.begin(), kTestedOpsRecv.end());
   ret.insert(kTestedOpsSend.begin(), kTestedOpsSend.end());
 
-  ret.emplace(HloOpcode::kAfterAll);
+  // go/keep-sorted start
   ret.emplace(HloOpcode::kAddDependency);
+  ret.emplace(HloOpcode::kAfterAll);
   ret.emplace(HloOpcode::kBatchNormGrad);
   ret.emplace(HloOpcode::kBatchNormInference);
   ret.emplace(HloOpcode::kBatchNormTraining);
@@ -3340,21 +3393,23 @@ absl::flat_hash_set<HloOpcode> AllTestedOpcodes() {
   ret.emplace(HloOpcode::kCustomCall);
   ret.emplace(HloOpcode::kDomain);
   ret.emplace(HloOpcode::kDot);
+  ret.emplace(HloOpcode::kDynamicSlice);  // TODO(b/417172838): add tests.
   ret.emplace(HloOpcode::kFft);
+  ret.emplace(HloOpcode::kFusion);
   ret.emplace(HloOpcode::kGetDimensionSize);
   ret.emplace(HloOpcode::kGetTupleElement);
+  ret.emplace(HloOpcode::kInfeed);
   ret.emplace(HloOpcode::kMap);
+  ret.emplace(HloOpcode::kOutfeed);
   ret.emplace(HloOpcode::kReverse);
   ret.emplace(HloOpcode::kRngBitGenerator);
   ret.emplace(HloOpcode::kRngGetAndUpdateState);
-  ret.emplace(HloOpcode::kTuple);
-  ret.emplace(HloOpcode::kWhile);
-  ret.emplace(HloOpcode::kFusion);
-  ret.emplace(HloOpcode::kInfeed);
-  ret.emplace(HloOpcode::kOutfeed);
   ret.emplace(HloOpcode::kStochasticConvert);
   ret.emplace(HloOpcode::kTopK);
   ret.emplace(HloOpcode::kTriangularSolve);
+  ret.emplace(HloOpcode::kTuple);
+  ret.emplace(HloOpcode::kWhile);
+  // go/keep-sorted end
   ret.insert(kUnsupportedOps.begin(), kUnsupportedOps.end());
 
   return ret;

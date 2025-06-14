@@ -64,16 +64,18 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
-    ],
+    ] + if_cuda([
+        "//xla/stream_executor/cuda:repeat_buffer_kernel_cuda",
+    ]),
 )
 
 xla_test(
     name = "cublas_test",
     srcs = ["cublas_test.cc"],
     backends = [
-        "gpu_a100",
-        "gpu_h100",
-        "gpu_b200",
+        "a100",
+        "h100",
+        "b200",
     ],
     tags = [
         "cuda-only",
@@ -88,6 +90,7 @@ xla_test(
         "//xla/hlo/testlib:filecheck",
         "//xla/hlo/testlib:hlo_hardware_independent_test_base",
         "//xla/service:compiler",
+        "//xla/service:executable",
         "//xla/service:platform_util",
         "//xla/service/gpu:gpu_device_info_for_tests",
         "//xla/service/gpu:nvptx_compiler_impl",
@@ -139,9 +142,9 @@ xla_test(
     name = "cublaslt_test",
     srcs = ["cublaslt_test.cc"],
     backends = [
-        "gpu_a100",
-        "gpu_h100",
-        "gpu_b200",
+        "a100",
+        "h100",
+        "b200",
     ],
     tags = [
         "cuda-only",
@@ -218,9 +221,9 @@ xla_test(
     name = "cudnn_test",
     srcs = ["cudnn_test.cc"],
     backends = [
-        "gpu_a100",
-        "gpu_h100",
-        "gpu_b200",
+        "a100",
+        "h100",
+        "b200",
     ],
     tags = [
         "cuda-only",
@@ -282,9 +285,9 @@ xla_test(
     name = "custom_kernel_test",
     srcs = ["custom_kernel_test.cc"],
     backends = [
-        "gpu_a100",
-        "gpu_h100",
-        "gpu_b200",
+        "a100",
+        "h100",
+        "b200",
     ],
     tags = [
         "cuda-only",
@@ -360,9 +363,9 @@ xla_test(
     name = "fission_test",
     srcs = ["fission_test.cc"],
     backends = [
-        "gpu_a100",
-        "gpu_h100",
-        "gpu_b200",
+        "a100",
+        "h100",
+        "b200",
     ],
     tags = [
         "cuda-only",
@@ -436,6 +439,7 @@ cc_library(
     hdrs = ["factory.h"],
     tags = ["gpu"],
     deps = [
+        ":cublas",
         ":triton",
         "//xla/backends/autotuner:codegen_backend",
         "//xla/service:compiler",
