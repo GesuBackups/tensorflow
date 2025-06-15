@@ -1211,7 +1211,8 @@ class MoveOperandIntoBranch {
                 HloOpcode::kGetTupleElement &&
             !branch_comp->root_instruction()->operand(0)->shape().IsTuple()) {
           branch_comp->set_root_instruction(
-              branch_comp->root_instruction()->mutable_operand(0));
+              branch_comp->root_instruction()->mutable_operand(0),
+              /* accept_different_shape =*/true);
         }
         UpdateTupleUsers(inserted);
       }
@@ -1297,6 +1298,7 @@ class GroupConnectedBoundaries {
   HloInstruction* conditional_;
   HloComputation* conditional_parent_;
   bool is_layout_sensitive_;
+  bool has_outfeed_;
   // Instructions that have been visited but are not going to be moved.
   absl::flat_hash_map<HloInstruction*, int>& visited_count_;
   // The following four lines are configurations of the cost model, which will
@@ -1386,6 +1388,12 @@ class GroupConnectedBoundaries {
       : conditional_(conditional),
         conditional_parent_(conditional->parent()),
         is_layout_sensitive_(is_layout_sensitive),
+        has_outfeed_(absl::c_any_of(
+            conditional->called_computations(),
+            [](HloComputation* computation) {
+              return absl::c_any_of(computation->instructions(),
+                                    HloPredicateIsOp<HloOpcode::kOutfeed>);
+            })),
         visited_count_(visited_count),
         move_config_(*move_config),
         reuse_config_(*reuse_config),
@@ -1767,7 +1775,7 @@ class GroupConnectedBoundaries {
                 << " because all of its dependents have been visited: "
                 << next_boundary_count << "\n";
         visited_count_.erase(next_boundary[0]);
-        EraseElementFromVector(&new_boundaries_, next_boundary).IgnoreError();
+        EraseElementFromVector(&new_boundaries_, next_boundary);
         return true;
       }
     }
@@ -1778,7 +1786,7 @@ class GroupConnectedBoundaries {
 
   int64_t CalculateMemorySize(const HloInstruction* hlo) {
     if (hlo->shape().IsTuple() ||
-        (hlo->opcode() != HloOpcode::kReduce &&
+        (!has_outfeed_ && hlo->opcode() != HloOpcode::kReduce &&
          absl::c_none_of(hlo->users(), HloPredicateIsOp<HloOpcode::kReduce>))) {
       return 0;
     }
