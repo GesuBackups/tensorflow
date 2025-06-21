@@ -136,14 +136,18 @@ xla_test(
     name = "analytical_latency_estimator_test",
     srcs = ["analytical_latency_estimator_test.cc"],
     backends = [
-        "gpu_v100",
-        "gpu_a100",
-        "gpu_h100",
-        "gpu_b200",
+        "v100",
+        "a100",
+        "h100",
+        "b200",
+        "amdgpu_any",
     ],
-    tags = [
-        "notap",
-    ],
+    tags =
+        if_google([
+            # TODO(b/414617899): Reenable once NVML works
+            "manual",
+            "notap",
+        ]),
     deps = [
         ":analytical_latency_estimator",
         "//xla:shape_util",
@@ -322,6 +326,7 @@ xla_cc_test(
         "//xla/service/gpu:hlo_fusion_analysis",
         "//xla/stream_executor:device_description",
         "//xla/tests:xla_internal_test_main",
+        "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",
         "@local_tsl//tsl/platform:statusor",
@@ -547,6 +552,7 @@ xla_cc_test(
         "//xla/stream_executor:device_description",
         "//xla/tests:xla_internal_test_main",
         "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
@@ -674,6 +680,7 @@ cc_library(
         "//xla/hlo/analysis:indexing_analysis",
         "//xla/hlo/ir:hlo",
         "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -735,6 +742,8 @@ xla_cc_test(
         "//xla/hlo/analysis:indexing_test_utils",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "//xla/tsl/platform:status_matchers",
+        "//xla/tsl/platform:statusor",
         "@com_google_googletest//:gtest_main",
         "@llvm-project//mlir:IR",
     ],
@@ -812,7 +821,7 @@ xla_cc_test(
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
