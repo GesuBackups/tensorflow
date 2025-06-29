@@ -73,8 +73,8 @@ static constexpr auto serialize =
 struct TestOnlyCommandBufferCmd : public CommandBufferCmd {
   TestOnlyCommandBufferCmd(ExecutionStreamId execution_stream_id,
                            BufferUseVector buffer_usage)
-      : CommandBufferCmd(CommandBufferCmdType::kUnknownCmd,
-                         execution_stream_id),
+      : CommandBufferCmd(CommandBufferCmdType::kUnknownCmd, execution_stream_id,
+                         {}),
         buffer_usage(buffer_usage) {}
 
   absl::StatusOr<const se::CommandBuffer::Command*> Record(
@@ -92,7 +92,7 @@ class FakeCmd : public CommandBufferCmd {
  public:
   explicit FakeCmd(ExecutionStreamId execution_stream_id)
       : CommandBufferCmd(CommandBufferCmdType::kTracedCommandBufferCmd,
-                         execution_stream_id) {}
+                         execution_stream_id, {}) {}
 
   absl::StatusOr<const se::CommandBuffer::Command*> Record(
       const Thunk::ExecuteParams&, const RecordParams&, RecordAction,
@@ -320,8 +320,9 @@ TEST(CommandBufferCmdTest, LaunchCmd) {
       CommandBufferCmdExecutor::Create(std::move(commands), serialize));
 
   // Initialize command commands and load device kernels.
-  TF_ASSERT_OK_AND_ASSIGN(std::vector<uint8_t> fatbin,
-                          se::gpu::GetGpuTestKernelsFatbin());
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<uint8_t> fatbin,
+      se::gpu::GetGpuTestKernelsFatbin(stream_executor->GetPlatform()->Name()));
   Thunk::ExecutableSource source = {/*text=*/{},
                                     /*binary=*/fatbin};
 
@@ -390,8 +391,9 @@ TEST(CommandBufferCmdTest, LaunchCmdWithPriority) {
       CommandBufferCmdExecutor::Create(std::move(commands), serialize));
 
   // Initialize command commands and load device kernels.
-  TF_ASSERT_OK_AND_ASSIGN(std::vector<uint8_t> fatbin,
-                          se::gpu::GetGpuTestKernelsFatbin());
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<uint8_t> fatbin,
+      se::gpu::GetGpuTestKernelsFatbin(stream_executor->GetPlatform()->Name()));
   Thunk::ExecutableSource source = {/*text=*/{},
                                     /*binary=*/fatbin};
 

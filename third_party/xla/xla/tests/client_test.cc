@@ -32,7 +32,6 @@ limitations under the License.
 #include "xla/shape_util.h"
 #include "xla/tests/client_library_test_base.h"
 #include "xla/tests/literal_test_util.h"
-#include "xla/tests/test_macros.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/util/proto/proto_matchers.h"
 #include "xla/xla_data.pb.h"
@@ -118,7 +117,7 @@ TEST_F(ClientTest, ExecuteWithTupleLayout) {
 // Disabled for interpreter since ExecuteAsyncOnStream is not implemented on
 // interpreter backend.
 TEST_F(ClientTest, ExecuteParallel) {
-  if (test::DeviceIsOneOf({test::kCpu, test::kGpu})) {
+  if (test::DeviceTypeIsOneOf({test::kCpu, test::kGpu})) {
     GTEST_SKIP();
   }
   XlaComputation add_with_one_arg, mul_with_two_args, dot_with_one_arg;

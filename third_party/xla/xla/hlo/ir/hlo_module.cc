@@ -45,6 +45,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/hlo_original_value.h"
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/map_util.h"
@@ -455,14 +456,14 @@ void HloModule::Print(Printer* printer, const HloPrintOptions& options) const {
         computation->CanExpandIntoSingleInstruction()) {
       continue;
     }
-    if (computation == entry_computation()) {
-      printer->Append("ENTRY ");
-    }
+    HloPrintOptions new_options = options;
+    new_options.set_print_computation_mode(
+        HloPrintOptions::PrintComputationMode::kComputationWithEntryKeyword);
     if (has_schedule() && schedule().is_computation_scheduled(computation)) {
-      computation->Print(printer, options,
+      computation->Print(printer, new_options,
                          schedule().sequence(computation).instructions());
     } else {
-      computation->Print(printer, options);
+      computation->Print(printer, new_options);
     }
     printer->Append("\n\n");
   }
@@ -794,6 +795,7 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
       module->stack_frame_index_ = std::move(proto.stack_frame_index());
     }
   }
+  DeduplicateOriginalValues(module.get());
   return module;
 }
 

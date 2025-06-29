@@ -38,7 +38,6 @@ limitations under the License.
 #include "xla/reference_util.h"
 #include "xla/tests/client_library_test_runner_mixin.h"
 #include "xla/tests/hlo_test_base.h"
-#include "xla/tests/test_macros.h"
 #include "xla/tsl/platform/test.h"
 
 namespace xla {
@@ -271,42 +270,42 @@ TEST_P(SliceR1Test, DoIt_S64) { Run<int64_t>(GetParam()); }
 // TODO(b/69425338): The following tests are disable on GPU because they use
 // too much GPU memory.
 TEST_P(SliceR1LargeTest, DoIt_F32) {
-  if (test::DeviceIs(test::kGpu)) {
+  if (test::DeviceTypeIs(test::kGpu)) {
     GTEST_SKIP();
   }
   Run<float>(GetParam());
 }
 
 TEST_P(SliceR1LargeTest, DoIt_F64) {
-  if (test::DeviceIs(test::kGpu)) {
+  if (test::DeviceTypeIs(test::kGpu)) {
     GTEST_SKIP();
   }
   Run<double>(GetParam());
 }
 
 TEST_P(SliceR1LargeTest, DoIt_U32) {
-  if (test::DeviceIs(test::kGpu)) {
+  if (test::DeviceTypeIs(test::kGpu)) {
     GTEST_SKIP();
   }
   Run<uint32_t>(GetParam());
 }
 
 TEST_P(SliceR1LargeTest, DoIt_S32) {
-  if (test::DeviceIs(test::kGpu)) {
+  if (test::DeviceTypeIs(test::kGpu)) {
     GTEST_SKIP();
   }
   Run<int32_t>(GetParam());
 }
 
 TEST_P(SliceR1LargeTest, DoIt_U64) {
-  if (test::DeviceIs(test::kGpu)) {
+  if (test::DeviceTypeIs(test::kGpu)) {
     GTEST_SKIP();
   }
   Run<uint64_t>(GetParam());
 }
 
 TEST_P(SliceR1LargeTest, DoIt_S64) {
-  if (test::DeviceIs(test::kGpu)) {
+  if (test::DeviceTypeIs(test::kGpu)) {
     GTEST_SKIP();
   }
   Run<int64_t>(GetParam());

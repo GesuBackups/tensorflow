@@ -1812,5 +1812,7 @@ TEST_F(GpuHloScheduleTest, LogAnErrorWhenArgumentSizeExceedsMemoryLimit) {
   EXPECT_EQ(metadata.scheduler_mem_limit, 0);
 }
 
+
+
 }  // namespace gpu
 }  // namespace xla

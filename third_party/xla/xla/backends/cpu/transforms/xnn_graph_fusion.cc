@@ -37,11 +37,16 @@ FusionDecision XnnGraphFusion::ShouldFuse(HloInstruction* consumer,
     return FusionDecision::Forbid("Unsupported consumer");
   }
 
+  if (consumer->opcode() == HloOpcode::kBroadcast) {
+    return FusionDecision::Forbid(
+        "Do not start growing fusions from broadcasts");
+  }
+
   HloInstruction* producer = consumer->mutable_operand(operand_index);
   if (!(producer->opcode() == HloOpcode::kParameter ||
-        producer->opcode() == HloOpcode::kConstant || IsOpSupported(producer)))
+        IsOpSupported(producer))) {
     return FusionDecision::Forbid("Unsupported producer");
-
+  }
   return FusionDecision::Allow();
 }
 
@@ -65,22 +70,35 @@ HloInstruction* XnnGraphFusion::Fuse(HloInstruction* producer,
 }
 
 bool XnnGraphFusion::IsOpSupported(const HloInstruction* instr) const {
+  if (!IsLayoutSupportedByXnn(instr->shape())) {
+    return false;
+  }
   if (!XnnDatatype(instr->shape().element_type()).ok()) {
     return false;
   }
-
+  if (instr->IsConstant()) {
+    return IsConstantSupportedByXnn(instr);
+  }
   if (instr->IsElementwise()) {
-    switch (instr->operand_count()) {
-      case 1:
-        return XnnUnaryOperator(instr->opcode()).ok();
-      case 2:
-        return XnnBinaryOperator(instr->opcode()).ok();
-      default:
-        return false;
-    }
+    return IsElementwiseOpSupportedByXnn(instr);
   }
 
-  return false;
+  switch (instr->opcode()) {
+    case HloOpcode::kBitcast:
+      return IsBitcastOpSupportedByXnn(instr);
+    case HloOpcode::kBroadcast: {
+      if (instr->GetModule()
+              ->config()
+              .debug_options()
+              .xla_cpu_experimental_xnn_graph_fusion_mode() !=
+          DebugOptions::XNN_GRAPH_FUSION_MODE_GREEDY_SLINKY) {
+        return false;
+      }
+      return IsBroadcastOpSupportedByXnn(instr);
+    }
+    default:
+      return false;
+  }
 }
 
 bool XnnGraphFusion::IsXnnGraphFusion(const HloInstruction* instr) const {

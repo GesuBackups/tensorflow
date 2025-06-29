@@ -29,8 +29,6 @@ bool_flag(
 config_setting(
     name = "nvshmem_supported",
     constraint_values = [
-        # TODO(b/409709288): Fix nvshmem ARM issues and remove this condition.
-        "@platforms//cpu:x86_64",
         "@platforms//os:linux",
     ],
     flag_values = {
@@ -128,6 +126,7 @@ cc_library(
         ":gpu_collectives",
         "//xla:debug_options_flags",
         "//xla:executable_run_options",
+        "//xla:status_macros",
         "//xla:types",
         "//xla:util",
         "//xla/core/collectives",
@@ -145,6 +144,7 @@ cc_library(
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/functional:function_ref",
         "@com_google_absl//absl/log",
@@ -155,6 +155,7 @@ cc_library(
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
+        "@local_tsl//tsl/platform:casts",
         "@local_tsl//tsl/platform:hash",
         "@local_tsl//tsl/profiler/lib:traceme",
     ],
@@ -168,7 +169,6 @@ cc_library(
         ":gpu_communicator",
         "//xla:executable_run_options",
         "//xla:shape_util",
-        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/core/collectives",
         "//xla/core/collectives:clique_id",
@@ -401,7 +401,6 @@ cc_library(
     deps = [
         ":gpu_collectives",
         "//xla:shape_util",
-        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/core/collectives",
         "//xla/core/collectives:clique_id",
@@ -416,7 +415,6 @@ cc_library(
         "//xla/stream_executor/gpu:gpu_stream",
         "//xla/tsl/concurrency:async_value",
         "//xla/tsl/platform:errors",
-        "//xla/tsl/platform:logging",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/container:inlined_vector",

@@ -161,6 +161,13 @@ class Thunk {
     kMemset32BitValue,
     kMemzero,
     kNorm,
+    kNvshmemCollectivePermute,
+    kNvshmemCollectivePermuteDone,
+    kNvshmemCollectivePermuteStart,
+    kNvshmemRecv,
+    kNvshmemRecvDone,
+    kNvshmemSend,
+    kNvshmemSendDone,
     kOutfeed,
     kPartitionId,
     kRaggedAllToAll,
@@ -290,21 +297,21 @@ class Thunk {
     const DeviceAssignment* device_assn;
     const GlobalDeviceIdMap* global_device_id_map;
     const CliqueIdCallback* nccl_clique_id_callback;
+    const absl::flat_hash_map<GlobalDeviceId, IncarnationId>* incarnations;
 
     int64_t collective_max_nchannels;
     int64_t p2p_max_nchannels;
 
    private:
-    CollectiveExecuteParams(GpuCollectives* collectives,
-                            se::StreamExecutor* executor, RunId run_id,
-                            absl::Span<se::Stream* const> async_streams,
-                            int64_t local_device_ordinal,
-                            GlobalDeviceId global_device_id,
-                            const DeviceAssignment* device_assn,
-                            const GlobalDeviceIdMap* global_device_id_map,
-                            const CliqueIdCallback* nccl_clique_id_callback,
-                            int64_t collective_max_nchannels,
-                            int64_t p2p_max_nchannels);
+    CollectiveExecuteParams(
+        GpuCollectives* collectives, se::StreamExecutor* executor, RunId run_id,
+        absl::Span<se::Stream* const> async_streams,
+        int64_t local_device_ordinal, GlobalDeviceId global_device_id,
+        const DeviceAssignment* device_assn,
+        const GlobalDeviceIdMap* global_device_id_map,
+        const CliqueIdCallback* nccl_clique_id_callback,
+        const absl::flat_hash_map<GlobalDeviceId, IncarnationId>* incarnations,
+        int64_t collective_max_nchannels, int64_t p2p_max_nchannels);
   };
 
   //===--------------------------------------------------------------------===//
@@ -515,10 +522,30 @@ class Thunk {
       absl::AnyInvocable<absl::StatusOr<std::unique_ptr<Thunk>>(
           const ThunkProto&) const>;
 
+  void add_control_predecessor(const Thunk* control_predecessor) {
+    control_predecessors_.push_back(control_predecessor);
+  }
+
+  std::vector<const Thunk*> control_predecessors() const {
+    return control_predecessors_;
+  }
+
+ protected:
+  // Returns a ThunkProto that has the common Thunk fields already set.
+  // It's meant to be called by subclasses in its implementation of `ToProto()`.
+  absl::StatusOr<ThunkInfoProto> GetThunkInfoProto() const;
+
  private:
   Kind kind_;
   std::string profile_annotation_;
   ExecutionStreamId execution_stream_id_;
+
+  // The list of control predecessors of the thunk.
+  // Thunk needs to maintain the control dependency information because
+  // when it is executed by command buffer, and command buffer may execute the
+  // sequence in concurrent mode, and we should make sure that it does not
+  // violate the control dependency in the original computation.
+  std::vector<const Thunk*> control_predecessors_;
 };
 
 // A sequence of thunks.

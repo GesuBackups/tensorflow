@@ -735,6 +735,7 @@ cc_library(
         "//third_party/py/grain/_src/tensorflow/ops:__pkg__",
         "//waymo/ml/compiler/frontend/kernels:__pkg__",
         "//waymo/ml/compiler/runtime/alpine/core:__pkg__",
+        "//waymo/ml/woodshed/ops:__pkg__",
     ],
     deps = [
         "//tensorflow/core/lib/core:refcount",
@@ -1624,6 +1625,7 @@ tf_proto_library(
     name = "device_attributes_proto",
     srcs = ["device_attributes.proto"],
     make_default_target_header_only = True,
+    visibility = ["//visibility:public"],
 )
 
 tf_proto_library(

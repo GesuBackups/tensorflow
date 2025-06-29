@@ -200,7 +200,9 @@ absl::StatusOr<SmallVector<Value, 1>> EmitReduce(
     }
     auto reducer = call_target_provider(
         instr->called_computations().front()->root_instruction());
-    return b.create<mlir::func::CallOp>(reducer, args).getResults();
+    mlir::func::CallOp call_op = b.create<mlir::func::CallOp>(reducer, args);
+    call_op->setAttr("xla.is_reduction", b.getUnitAttr());
+    return call_op.getResults();
   };
 
   return EmitLoopNestWithStatus(b, indices, init_values, indexing_map, body);
@@ -241,7 +243,9 @@ absl::StatusOr<SmallVector<Value, 1>> EmitReduceWindow(
 
     auto reducer = call_target_provider(
         instr->called_computations().front()->root_instruction());
-    return b.create<mlir::func::CallOp>(reducer, args).getResults();
+    mlir::func::CallOp call_op = b.create<mlir::func::CallOp>(reducer, args);
+    call_op->setAttr("xla.is_reduction", b.getUnitAttr());
+    return call_op.getResults();
   };
 
   return EmitLoopNestWithStatus(b, indices, init_values, indexing_map, body);
@@ -1723,6 +1727,10 @@ SmallVector<Value, 2> InlineBlock(OpBuilder& builder, Block& src_block,
     mapped_results.push_back(mapping.lookup(result));
   }
   return mapped_results;
+}
+
+bool IsSupportedElementalOp(HloOpcode opcode) {
+  return !kUnsupportedOps.contains(opcode);
 }
 
 }  // namespace emitters
